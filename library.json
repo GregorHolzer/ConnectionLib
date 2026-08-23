@@ -1,0 +1,19 @@
+{
+    "name": "ConnectionLib",
+    "version": "0.1.0",
+    "description": "Technology-agnostic transport abstraction for star-topology LoRa/ESP-NOW/Zigbee wireless sensor networks (ESP32).",
+    "keywords": ["lora", "esp-now", "espnow", "zigbee", "wireless", "sensor-network", "esp32", "platformio"],
+    "repository": {
+        "type": "git",
+        "url": "git@github.com:GregorHolzer/ConnectionLib.git"
+    },
+    "authors": [
+        {
+            "name": "Gregor Holzer",
+            "email": "gregor.holzer@uibk.ac.at"
+        }
+    ],
+    "license": "MIT",
+    "frameworks": "*",
+    "platforms": "*"
+}
