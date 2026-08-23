@@ -25,6 +25,9 @@ struct XBeeAddressPair {
  */
 class Address {
   public:
+    /** @brief Default-constructs a Broadcast-kind sentinel address; prefer the named factories below. */
+    Address() = default;
+
     static Address mac(const std::array<uint8_t, 6> &mac);
     static Address xbee(uint64_t addr64, uint16_t addr16 = 0xFFFE);
     static Address loRaNode(uint16_t nodeId);
@@ -41,8 +44,6 @@ class Address {
     bool operator!=(const Address &other) const;
 
   private:
-    Address() = default;
-
     AddressKind kind_ = AddressKind::Broadcast;
     std::array<uint8_t, 8> bytes_{};   // holds MAC (6B) / XBee 64-bit addr / LoRa node id, kind-dependent
     uint16_t aux16_ = 0;               // XBee 16-bit network address only
