@@ -1,6 +1,6 @@
 #include "ConnectionLib/backends/lora/LoRaTransport.hpp"
 
-#if defined(ESP32)
+#if defined(ESP32) && defined(CONNECTIONLIB_ENABLE_LORA)
 
 #include <algorithm>
 #include <cstring>

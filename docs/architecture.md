@@ -49,10 +49,20 @@ includes this repo as a git submodule so the lib source stays readable/buildable
 
 **RadioLib is not a `library.json` dependency.** It's scoped per-example (`lib_deps =
 jgromes/RadioLib@^6` in each LoRa example's own `platformio.ini`, in the examples repo), so an
-ESP-NOW-only consumer of ConnectionLib never pulls it in. This works because PlatformIO's LDF only
-compiles translation units actually `#include`d — enforced by having **no umbrella header** that
-includes every backend. Trade-off: no single "install and it all just works" header; acceptable
-given the examples repo shows exactly what to add per backend.
+ESP-NOW-only consumer of ConnectionLib never pulls it in.
+
+**Each backend is also guarded behind an opt-in build macro**
+(`CONNECTIONLIB_ENABLE_ESPNOW`/`CONNECTIONLIB_ENABLE_LORA`), not just `#if defined(ESP32)` — this
+was tightened after discovering that PlatformIO compiles a dependency's **entire `src/` tree**
+once it's pulled in at all, not just the translation units whose headers a consumer actually
+`#include`s. An `#if defined(ESP32)`-only guard was not enough to stop an ESP-NOW-only consumer
+from hitting `RadioLib.h: No such file or directory` compiling `LoRaTransport.cpp`, since that file
+still gets compiled as part of ConnectionLib's library archive regardless of what the consumer's
+own `main.cpp` includes. Consumers now must both add the backend's enable macro to `build_flags`
+and add its hardware dependency (RadioLib for LoRa) to `lib_deps`; forgetting either produces an
+immediate, clear compile error rather than a silent unconditional dependency. No umbrella header
+still exists that includes every backend — trade-off: no single "install and it all just works"
+header; acceptable given the examples repo shows exactly what to add per backend.
 
 Namespace `connectionlib` wraps everything — a deliberate departure from sensor-system's bare
 global-class style (`ForteSensor`), justified because ConnectionLib is a redistributable package

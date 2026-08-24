@@ -5,11 +5,13 @@
 #include "ConnectionLib/DutyCycleGuard.hpp"
 #include "ConnectionLib/Transport.hpp"
 
-// This backend depends on RadioLib and the Arduino SPI class, unavailable off-device. Guarded so
-// the library's portable core (Address, DutyCycleGuard, Transport) still builds standalone for
-// `pio test -e native`, since PlatformIO compiles a dependency's whole src/ tree once any header
-// in it is referenced, not just the specific headers actually #include'd.
-#if defined(ESP32)
+// This backend depends on RadioLib and the Arduino SPI class. Guarded behind an opt-in macro, not
+// just `defined(ESP32)`: PlatformIO compiles a dependency's *entire* src/ tree once it's pulled
+// in at all, regardless of which headers a consumer actually #include's — so an ESP-NOW-only
+// consumer building for ESP32 would otherwise still hit "RadioLib.h: No such file or directory"
+// compiling this file, even though it never uses LoRaTransport. Consumers that want this backend
+// must both add `-DCONNECTIONLIB_ENABLE_LORA` to build_flags and add RadioLib to lib_deps.
+#if defined(ESP32) && defined(CONNECTIONLIB_ENABLE_LORA)
 
 #include <RadioLib.h>
 #include <SPI.h>

@@ -1,6 +1,6 @@
 #include "ConnectionLib/backends/espnow/EspNowTransport.hpp"
 
-#if defined(ESP32)
+#if defined(ESP32) && defined(CONNECTIONLIB_ENABLE_ESPNOW)
 
 #include <algorithm>
 

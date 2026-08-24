@@ -7,11 +7,12 @@
 #include "ConnectionLib/DutyCycleGuard.hpp"
 #include "ConnectionLib/Transport.hpp"
 
-// This backend depends on the Arduino-ESP32 core's esp_now.h, unavailable off-device. Guarded so
-// the library's portable core (Address, DutyCycleGuard, Transport) still builds standalone for
-// `pio test -e native`, since PlatformIO compiles a dependency's whole src/ tree once any header
-// in it is referenced, not just the specific headers actually #include'd.
-#if defined(ESP32)
+// This backend depends on the Arduino-ESP32 core's esp_now.h. Guarded behind an opt-in macro, not
+// just `defined(ESP32)`, for the same reason as LoRaTransport (see its header): PlatformIO
+// compiles a dependency's entire src/ tree once pulled in at all, so a LoRa-only consumer would
+// otherwise still get ESP-NOW's code (and flash footprint) compiled in unasked. Consumers that
+// want this backend add `-DCONNECTIONLIB_ENABLE_ESPNOW` to build_flags.
+#if defined(ESP32) && defined(CONNECTIONLIB_ENABLE_ESPNOW)
 
 #include <esp_now.h>
 
