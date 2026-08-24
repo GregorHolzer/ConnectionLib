@@ -36,23 +36,23 @@ src/ConnectionLib/
   backends/espnow/EspNowTransport.cpp
   backends/lora/LoRaTransport.cpp
 
-examples/
-  espnow_satellite/  espnow_gateway/    # minimal send/receive demo pair
-  lora_satellite/    lora_gateway/      # minimal send/receive demo pair
-  verify_native_espnow/                 # exposé step-2 harness
-  verify_native_lora/                   # exposé step-2 harness
-
 test/
   test_address/  test_duty_cycle/       # pure logic, native host env, no hardware
   test_espnow_device/  test_lora_device/  # optional, added later once M3/M5 numbers exist
 ```
 
+**ConnectionLib is lib-only** — no `examples/` in this repo. Runnable examples
+(`espnow_satellite`/`espnow_gateway`, `lora_satellite`/`lora_gateway`, and eventually the
+verify-against-native harnesses below) live in the separate
+[`ConnectionLib-examples`](https://github.com/GregorHolzer/ConnectionLib-examples) repo, which
+includes this repo as a git submodule so the lib source stays readable/buildable from there.
+
 **RadioLib is not a `library.json` dependency.** It's scoped per-example (`lib_deps =
-jgromes/RadioLib@^6` in each LoRa example's own `platformio.ini`), so an ESP-NOW-only consumer of
-ConnectionLib never pulls it in. This works because PlatformIO's LDF only compiles translation
-units actually `#include`d — enforced by having **no umbrella header** that includes every backend.
-Trade-off: no single "install and it all just works" header; acceptable given the examples show
-exactly what to add per backend.
+jgromes/RadioLib@^6` in each LoRa example's own `platformio.ini`, in the examples repo), so an
+ESP-NOW-only consumer of ConnectionLib never pulls it in. This works because PlatformIO's LDF only
+compiles translation units actually `#include`d — enforced by having **no umbrella header** that
+includes every backend. Trade-off: no single "install and it all just works" header; acceptable
+given the examples repo shows exactly what to add per backend.
 
 Namespace `connectionlib` wraps everything — a deliberate departure from sensor-system's bare
 global-class style (`ForteSensor`), justified because ConnectionLib is a redistributable package
@@ -151,6 +151,24 @@ class Transport {
 No auto-chunking: if `len > maxPayloadBytes()`, `send()` returns `SendStatus::PayloadTooLarge`.
 Chunking/retry policy (sensor-system's 15×`ClientDataPackage` + RTC-cache-on-timeout) is an
 app-level decision, not something to bake into a technology-agnostic interface.
+
+**`ProtocolKind`** (`include/ConnectionLib/Transport.hpp`) — `enum class ProtocolKind : uint8_t {
+EspNow, LoRa, Zigbee };` (Zigbee reserved/unimplemented, matching `AddressKind`'s existing
+precedent). A shared vocabulary type so application code can select a backend via a runtime value
+instead of the choice being implicit in which concrete class is written in source — e.g. a future
+benchmark app choosing the protocol from a config setting rather than which binary got flashed.
+`EspNowTransport`/`LoRaTransport` already have public constructors and both derive from
+`Transport`, so `std::unique_ptr<Transport> t = std::make_unique<EspNowTransport>(config);` already
+works without any factory — `ProtocolKind` is the only piece that was actually missing.
+
+**Deliberately no `createTransport(ProtocolKind, ...)` factory in this library.** Each backend has
+its own `Config` type and header, and `LoRaTransport.hpp` transitively pulls in RadioLib — a
+unified factory here would need to reference every backend's types together, forcing RadioLib onto
+every consumer even an ESP-NOW-only one, which is exactly the unconditional-dependency problem the
+RadioLib-scoping decision above already avoids. The actual `switch (kind) { ... }` dispatch belongs
+in application code, which already knows which backends it has chosen to link in — same reasoning
+already applied to board bring-up (T-Beam pins, AXP2101 power), which also lives in the examples
+repo, not this library.
 
 **Receive model: blocking `send()` (bounded by a timeout) + polled `poll()`, no async callbacks.**
 Justification: ESP-NOW's existing pattern already blocks on a flag; RadioLib's interrupt-driven

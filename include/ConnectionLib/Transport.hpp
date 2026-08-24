@@ -10,6 +10,19 @@
 namespace connectionlib {
 
 /**
+ * @brief Which concrete Transport backend to use. A shared vocabulary type so application code
+ * can select a backend via a runtime value (e.g. a config setting) instead of the choice being
+ * implicit in which concrete class (EspNowTransport, LoRaTransport, ...) is written in source.
+ *
+ * There is deliberately no createTransport(ProtocolKind, ...) factory in this library: each
+ * backend has its own Config type and header (LoRaTransport.hpp transitively pulls in RadioLib),
+ * so a unified factory here would force every consumer to depend on every backend. The
+ * `switch (kind) { ... }` dispatch belongs in application code, which already knows which
+ * backends it has chosen to link in.
+ */
+enum class ProtocolKind : uint8_t { EspNow, LoRa, Zigbee };   // Zigbee: reserved, unimplemented
+
+/**
  * @brief Technology-agnostic transport for a star-topology wireless sensor network. Application
  * code is written once against this interface; which concrete backend (ESP-NOW, LoRa, later
  * Zigbee) actually carries the traffic can change without touching the caller.
