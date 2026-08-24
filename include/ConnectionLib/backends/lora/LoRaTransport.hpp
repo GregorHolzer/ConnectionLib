@@ -53,6 +53,12 @@ struct LoRaConfig {
  * poll() is genuinely non-blocking: setup() puts the radio into continuous receive via
  * startReceive(), and poll() just checks the DIO0 pin (which the SX1278 maps to RxDone by
  * default) before touching RadioLib at all.
+ *
+ * On boards where the SX1278 is behind a gated power rail (e.g. the T-Beam's AXP2101 PMU, which
+ * powers the radio through its ALDO2 channel), the application must enable that rail before
+ * calling setup() — otherwise it fails with RadioLib's RADIOLIB_ERR_CHIP_NOT_FOUND, since the
+ * radio can't be reached over SPI at all. This is board bring-up, not this backend's job; see
+ * examples/lora_gateway and examples/lora_satellite for the T-Beam's specific sequence.
  */
 class LoRaTransport : public Transport {
   public:
