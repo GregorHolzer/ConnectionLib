@@ -42,10 +42,21 @@ struct ZigbeeConfig {
  * poll() is genuinely non-blocking: xbee-arduino's readPacket() (no-argument form) returns
  * immediately whether or not a frame is waiting - matches the Transport contract exactly.
  *
- * Prerequisite this class cannot satisfy for you: two factory-default XBee S2C modules do not
- * form a network together (both default to Router). One module - conventionally whichever one
- * calls send() as the initiator - must be set to Coordinator (AT command CE=1) via XCTU first.
- * This is one-time module configuration, not something ConnectionLib does at runtime.
+ * REQUIRES ZB (ZigBee) FIRMWARE. XBee S2C hardware also ships with 802.15.4 firmware, which
+ * implements a completely different API frame set (transmit 0x00/0x01 with status 0x89, receive
+ * 0x80/0x81) and simply ignores the ZB frames used here. Check AT VR: 4xxx is ZB, 2xxx is
+ * 802.15.4. The symptom of the mismatch is deceptive - AT command frames are still answered, so
+ * the module looks alive and correctly configured, but every send() returns SendStatus::Timeout
+ * because no status frame is ever emitted. Confirmed against hardware; see docs/hardware.md.
+ *
+ * Prerequisites this class cannot satisfy for you - one-time module configuration, not something
+ * ConnectionLib does at runtime:
+ *   - AP=1 (API mode). Factory default is 0 (Transparent), in which the module would transmit
+ *     these API frames as raw payload: no ack, no error, silent failure.
+ *   - CE=1 on exactly one module - conventionally whichever calls send() as the initiator.
+ *     Every module defaults to Router, and two Routers never form a network.
+ * Both can be set over the module's own UART from the host MCU (+++, then ATAP1/ATCE1/ATWR/ATCN);
+ * XCTU is not required, which matters when working headless.
  */
 class ZigbeeTransport : public Transport {
   public:

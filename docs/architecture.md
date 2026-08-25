@@ -313,10 +313,31 @@ what `pingpong`'s Zigbee gateway env sends to, sidestepping any address-bootstra
 (unlike ESP-NOW's MAC exchange): the node just replies to `received->source`, which the backend
 already populates from the actual sender's address.
 
-**Open risk this backend does not and cannot resolve in code**: two factory-default XBee S2C
-modules do **not** form a network together (both default to Router). One module must be set to
-Coordinator (AT command `CE=1`, via XCTU) before any of this will actually communicate over the
-air — a one-time manual module-configuration step, not something `setup()` can do at runtime.
+**Blocker found during hardware bring-up: this backend does not work on the project's actual
+modules, which run 802.15.4 firmware rather than ZB firmware.** The two firmwares share the
+hardware but not the API frame set — 802.15.4 uses `0x00`/`0x01` to transmit, `0x89` for status
+and `0x80`/`0x81` to receive, and ignores the `0x10` ZB frames this backend sends. Verified
+directly: a hand-built `0x10` frame draws no response at all, while `0x00`/`0x01` return `0x89`
+with `status=0x00`. Check `AT VR` — `4xxx` is ZB, `2xxx` (ours: `VR=2003`, `HV=2246`) is 802.15.4.
+The mismatch is easy to misdiagnose, because AT command frames are still answered normally, so the
+module presents as alive and correctly configured while every `send()` returns `Timeout`.
+Resolving it means either reflashing the modules to ZB firmware (XCTU plus an XBee USB adapter;
+it cannot be done through the ESP32 passthrough) or retargeting the backend at 802.15.4 — the
+latter also invalidates the APS-ack claim above and the 84-byte payload limit. See
+[`hardware.md`](hardware.md) for the full evidence. Undecided; nothing in the code has been
+changed to accommodate 802.15.4.
+
+**Open risks this backend does not and cannot resolve in code** — one-time manual module
+configuration, not something `setup()` can do at runtime:
+
+- **`AP=1`** (API mode). Factory default is `AP=0` (Transparent), in which the module transmits
+  these API frames as ordinary payload — no ack, no error, and a failure mode indistinguishable
+  from bad wiring. Confirmed as the default on two independent modules.
+- **`CE=1` on exactly one module.** Every module defaults to Router, so two factory-default
+  modules never form a network at all.
+
+Both are settable over the module's own UART from the host MCU (`+++`, then
+`ATAP1`/`ATCE1`/`ATWR`/`ATCN`) — XCTU is not required, which matters for headless work.
 
 **RSSI/SNR left `nullopt`**, same gap as ESP-NOW: the ZB RX frame doesn't carry signal quality
 in-band; a separate `DB` AT query after each receive would be needed, not implemented in this pass.
@@ -348,7 +369,7 @@ bound can't be chosen correctly before the example has actually run once.
 | M5 | LoRa native-vs-library harness. | Plausible numbers from `examples/verify_native_lora`. |
 | M5.5 | (optional) Promote to `test/test_lora_device/`. | Same pattern as M3.5. |
 | M6 | This document, README quickstart per backend, Doxygen audit. | Human review. |
-| M7 | Zigbee/XBee backend — implemented (`ZigbeeTransport`, `andrewrapp/xbee-arduino`). | Compiles/links for `zigbee_gateway`/`zigbee_node` in the examples repo. Real send/receive needs the XBee actually wired and one module set to Coordinator via XCTU — both pending as of this pass. |
+| M7 | Zigbee/XBee backend — implemented (`ZigbeeTransport`, `andrewrapp/xbee-arduino`). | Compiles/links for `zigbee_gateway`/`zigbee_node` in the examples repo. **Hardware bring-up done and blocked**: wiring verified, both modules powered, associated (`AI=0`, same PAN/channel) and set to `AP=1`/`CE=1`, but they run 802.15.4 firmware, not ZB — so every `send()` times out. See the Zigbee backend section and [`hardware.md`](hardware.md). |
 
 ## Open risks (flagged, not silently resolved)
 
@@ -364,7 +385,13 @@ bound can't be chosen correctly before the example has actually run once.
 4. **`std::vector`/heap use** in `EspNowConfig.peers` and `ReceivedMessage.payload` — a deliberate
    simplicity-over-embedded-purism trade-off (ESP32 has ample heap for this workload) rather than
    fixed-capacity containers.
-5. **`library.json` license/publishing target** left open — MIT is a reasonable default (matches
+5. **Zigbee backend is unusable on the project's current hardware** — the XBee S2C modules run
+   802.15.4 firmware, whose API frame set `ZigbeeTransport` does not implement. This is a
+   direction decision, not a bug: reflash the modules to ZB firmware and keep measuring ZigBee's
+   mesh/network layer, or retarget the backend at 802.15.4 and accept that the benchmark then
+   compares a MAC layer rather than a mesh. The latter also affects the exposé's RQ1/RQ2 framing.
+   Details and evidence in [`hardware.md`](hardware.md).
+6. **`library.json` license/publishing target** left open — MIT is a reasonable default (matches
    RadioLib's own licensing) unless the user wants something else; whether this ever gets published
    to the PlatformIO registry vs. just referenced as a git dependency affects how much manifest
    polish is worth doing now.

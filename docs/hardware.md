@@ -32,10 +32,61 @@ variant definition. The OLED display sits directly over this header on the physi
 wiring in practice means soldering to the header's solder joints on the underside of the PCB
 rather than plugging a connector in from the top.
 
-**Prerequisite before two modules will talk to each other**: XBee ZB firmware defaults every
-module to Router — two factory-default modules do **not** automatically form a network. One
-module must be set to Coordinator (AT command `CE=1`) via XCTU first; this is one-time module
-configuration, not something firmware can do at runtime.
+**Pin numbering differs between the two module form factors**, and the user guide contains both
+tables. Wire by *signal name*, not by pin number, unless you have checked which variant you hold:
+
+| Signal | Surface-mount (SMT, p. 41) | Through-hole (TH, p. 44) |
+|--------|---------------------------|--------------------------|
+| GND    | 1                         | 10                       |
+| VCC    | 2                         | 1                        |
+| DOUT   | 3                         | 2                        |
+| DIN    | 4                         | 3                        |
+
+The modules used in this project are the **SMT** variant (`GND, VCC, DOUT, DIN` = pins 1-4).
+Two SMT-only straps are worth knowing about, because either makes a module look dead while it is
+in fact perfectly healthy: pin 15 `SPI_SSEL` held low at reset selects SPI instead of UART, and
+pin 12 `SPI_ATTN/BOOTMODE` is documented "do not tie low on reset" — low means bootloader mode.
+
+**Prerequisites before two modules will talk to each other.** None of these can be done from
+firmware at runtime; all are one-time module configuration.
+
+1. **`AP=1` (API mode).** `ZigbeeTransport` speaks only API frames. Factory default is `AP=0`
+   (Transparent), in which the module treats those frames as ordinary payload and transmits them
+   verbatim — no ack, no error, and a failure indistinguishable from bad wiring. Confirmed as the
+   default on two independent modules during bring-up.
+2. **`CE=1` on exactly one module.** Every module defaults to Router, so two factory-default
+   modules never form a network at all.
+3. **ZB (ZigBee) firmware, not 802.15.4** — see the blocker below.
+
+Both `AP` and `CE` can be set over the module's UART from the host MCU (enter command mode with
+`+++`, then `ATAP1` / `ATCE1` / `ATWR` / `ATCN`). XCTU is *not* required for this, which matters
+when working headless — XCTU is a Java GUI and expects the module on a USB adapter.
+
+**Blocker found during bring-up: the modules ship with 802.15.4 firmware, not ZigBee firmware.**
+XBee S2C hardware runs either, and the two speak completely different API frame sets. Check `VR`:
+a `2xxx` value (ours read `VR=2003`, `HV=2246`) is the 802.15.4 series; ZB firmware reports `4xxx`.
+The practical symptom is oddly specific — AT command frames (`0x08`) are answered normally, so the
+module looks alive and correctly configured, but transmit requests are met with total silence:
+
+| Operation            | ZigBee firmware      | 802.15.4 firmware        |
+|----------------------|----------------------|--------------------------|
+| Transmit             | `ZBTxRequest` `0x10` | `0x00` (64-bit) / `0x01` (16-bit) |
+| Receive              | `ZBRxResponse` `0x90`| `0x80` / `0x81`          |
+| Transmit status      | `0x8B`               | `0x89`                   |
+| Max payload          | 84 bytes             | 100 bytes                |
+| Ack semantics        | network-layer (APS)  | MAC-layer                |
+
+Verified directly against the hardware: a hand-built `0x10` frame gets no response at all, while
+`0x00` and `0x01` both return `0x89` with `status=0x00` (success). `MY=0` on every module is
+another tell — in 802.15.4 `MY` is the 16-bit source address and defaults to 0.
+
+This is not merely an implementation detail. 802.15.4 is the PHY/MAC layer; ZigBee is the
+mesh/network layer on top, and that network layer is exactly what the RQ1/RQ2 comparison is
+meant to exercise. Either the modules get reflashed to ZB firmware (XCTU, and an XBee USB adapter
+— this cannot go through the ESP32 passthrough), or the backend is rewritten against 802.15.4 and
+renamed, in which case the APS-ack claim and the 84-byte limit both have to be corrected.
+**Undecided as of this pass; `ZigbeeTransport` remains ZB-only and therefore non-functional on
+the current hardware.**
 
 ## LoRa — LilyGO T-Beam Meshtastic
 
