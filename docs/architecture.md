@@ -1,11 +1,11 @@
 # ConnectionLib architecture
 
 Design for the core library: a technology-agnostic C++ transport abstraction over ESP-NOW, LoRa,
-and (later) Zigbee for star-topology wireless sensor networks, targeting PlatformIO/ESP32. Scope is
+and Zigbee for star-topology wireless sensor networks, targeting PlatformIO/ESP32. Scope is
 RQ1/RQ2 only (see [`sensor-system-findings.md`](sensor-system-findings.md)) — no RQ3 (automatic
-per-link technology selection) machinery. Zigbee (Digi XBee S2C) stays interface-ready but
-unimplemented for now; only ESP-NOW and LoRa (LilyGO T-Beam, SX1278 @ 433 MHz via RadioLib, see
-[`hardware.md`](hardware.md)) get built in this pass.
+per-link technology selection) machinery. All three backends are implemented: ESP-NOW, LoRa
+(LilyGO T-Beam, SX1278 @ 433 MHz via RadioLib), and Zigbee (Digi XBee S2C via xbee-arduino) — see
+[`hardware.md`](hardware.md).
 
 Two design decisions worth calling out up front:
 - **LoRa ack semantics: fire-and-forget.** `LoRaTransport::send()`'s `acknowledged` is always
@@ -29,12 +29,13 @@ include/ConnectionLib/             # public headers, namespace `connectionlib`
   DutyCycleGuard.hpp
   backends/espnow/EspNowTransport.hpp   # + EspNowConfig
   backends/lora/LoRaTransport.hpp       # + LoRaConfig, LoRaPinConfig (T-Beam defaults)
-  # backends/zigbee/  -- intentionally NOT created yet, see below
+  backends/zigbee/ZigbeeTransport.hpp   # + ZigbeeConfig, ZigbeePinConfig (T-Beam wiring)
 
 src/ConnectionLib/
   DutyCycleGuard.cpp
   backends/espnow/EspNowTransport.cpp
   backends/lora/LoRaTransport.cpp
+  backends/zigbee/ZigbeeTransport.cpp
 
 test/
   test_address/  test_duty_cycle/       # pure logic, native host env, no hardware
@@ -52,14 +53,15 @@ jgromes/RadioLib@^6` in each LoRa example's own `platformio.ini`, in the example
 ESP-NOW-only consumer of ConnectionLib never pulls it in.
 
 **Each backend is also guarded behind an opt-in build macro**
-(`CONNECTIONLIB_ENABLE_ESPNOW`/`CONNECTIONLIB_ENABLE_LORA`), not just `#if defined(ESP32)` — this
-was tightened after discovering that PlatformIO compiles a dependency's **entire `src/` tree**
-once it's pulled in at all, not just the translation units whose headers a consumer actually
-`#include`s. An `#if defined(ESP32)`-only guard was not enough to stop an ESP-NOW-only consumer
-from hitting `RadioLib.h: No such file or directory` compiling `LoRaTransport.cpp`, since that file
-still gets compiled as part of ConnectionLib's library archive regardless of what the consumer's
-own `main.cpp` includes. Consumers now must both add the backend's enable macro to `build_flags`
-and add its hardware dependency (RadioLib for LoRa) to `lib_deps`; forgetting either produces an
+(`CONNECTIONLIB_ENABLE_ESPNOW`/`CONNECTIONLIB_ENABLE_LORA`/`CONNECTIONLIB_ENABLE_ZIGBEE`), not just
+`#if defined(ESP32)` — this was tightened after discovering that PlatformIO compiles a dependency's
+**entire `src/` tree** once it's pulled in at all, not just the translation units whose headers a
+consumer actually `#include`s. An `#if defined(ESP32)`-only guard was not enough to stop an
+ESP-NOW-only consumer from hitting `RadioLib.h: No such file or directory` compiling
+`LoRaTransport.cpp`, since that file still gets compiled as part of ConnectionLib's library archive
+regardless of what the consumer's own `main.cpp` includes. Consumers now must both add the
+backend's enable macro to `build_flags` and add its hardware dependency (RadioLib for LoRa,
+xbee-arduino for Zigbee) to `lib_deps`; forgetting either produces an
 immediate, clear compile error rather than a silent unconditional dependency. No umbrella header
 still exists that includes every backend — trade-off: no single "install and it all just works"
 header; acceptable given the examples repo shows exactly what to add per backend.
@@ -163,12 +165,11 @@ Chunking/retry policy (sensor-system's 15×`ClientDataPackage` + RTC-cache-on-ti
 app-level decision, not something to bake into a technology-agnostic interface.
 
 **`ProtocolKind`** (`include/ConnectionLib/Transport.hpp`) — `enum class ProtocolKind : uint8_t {
-EspNow, LoRa, Zigbee };` (Zigbee reserved/unimplemented, matching `AddressKind`'s existing
-precedent). A shared vocabulary type so application code can select a backend via a runtime value
-instead of the choice being implicit in which concrete class is written in source — e.g. a future
-benchmark app choosing the protocol from a config setting rather than which binary got flashed.
-`EspNowTransport`/`LoRaTransport` already have public constructors and both derive from
-`Transport`, so `std::unique_ptr<Transport> t = std::make_unique<EspNowTransport>(config);` already
+EspNow, LoRa, Zigbee };`. A shared vocabulary type so application code can select a backend via a
+runtime value instead of the choice being implicit in which concrete class is written in source —
+e.g. a future benchmark app choosing the protocol from a config setting rather than which binary
+got flashed. `EspNowTransport`/`LoRaTransport`/`ZigbeeTransport` all have public constructors and
+derive from `Transport`, so `std::unique_ptr<Transport> t = std::make_unique<EspNowTransport>(config);` already
 works without any factory — `ProtocolKind` is the only piece that was actually missing.
 
 **Deliberately no `createTransport(ProtocolKind, ...)` factory in this library.** Each backend has
@@ -268,20 +269,57 @@ worth keeping in mind when the benchmark app interprets results, but not a libra
 
 **Duty cycle**: `LoRaConfig.dutyCycle` feeds a `DutyCycleGuard` exactly as ESP-NOW does.
 
-## Zigbee — interface-ready, not implemented
+## Zigbee backend
 
-No `backends/zigbee/` directory yet (an empty dir isn't git-trackable anyway, and per CLAUDE.md's
-bias against speculative scaffolding, a placeholder folder adds nothing enforceable). Confirmed the
-existing abstractions already accommodate it when the time comes:
-- `Address::xbee(addr64, addr16)`/`asXBee()` already model XBee's 64-bit (SH+SL) + 16-bit network
-  address scheme (matches `XBeeAddress64` in `andrewrapp/xbee-arduino`, the standard API-mode driver
-  for this module).
-- A future `ZigbeeConfig` would follow the same "plain struct" shape as the other two configs
-  (UART handle, baud, own 64-bit address, PAN ID, `DutyCycleConfig`) — no `Transport` changes needed.
-- `Transport::poll()`'s non-blocking contract already matches `xbee-arduino`'s only model
-  (`readPacket(timeout)`).
-- ZB TX Status frames (0x8B) carry a real network-layer delivery ack, so `acknowledged` would map
-  naturally from that later — noted for completeness, not designed further.
+`ZigbeeTransport` wraps the Digi XBee/XBee-PRO S2C module (ZB firmware) via
+`andrewrapp/xbee-arduino`'s API-mode driver over UART — the module itself handles the Zigbee
+mesh/network layer entirely; this backend only frames ZB TX/RX requests, never AT configuration.
+`Address::xbee(addr64, addr16)`/`asXBee()` already modeled XBee's 64-bit (SH+SL) + 16-bit network
+address scheme correctly (confirmed against `XBeeAddress64`), so no core `Address` changes were
+needed to add this backend — the interface-readiness work paid off as designed.
+
+**No "own address" field in `ZigbeeConfig`** (the earlier speculative sketch here suggested one):
+`ZBTxRequest` only needs the *destination* address, and the module's own address is never queried
+by this backend, so there was nothing to actually configure.
+
+```cpp
+struct ZigbeePinConfig {              // T-Beam wiring
+    int rx = 13;   // ESP32 RX <- XBee DOUT
+    int tx = 25;   // ESP32 TX <- XBee DIN
+};
+struct ZigbeeConfig {
+    ZigbeePinConfig pins{};
+    uint32_t baud = 9600;             // XBee factory default
+    DutyCycleConfig dutyCycle{100.0f, 3'600'000};   // 2.4GHz ISM: no ETSI duty-cycle mandate
+};
+```
+
+**Ack: a real network-layer ack, unlike LoRa's fire-and-forget.** `ZBTxStatusResponse` reports
+whether the destination actually received the frame, with the module's own mesh retries already
+applied — `send()` waits (bounded, `kTxStatusWaitMs = 500`) for that specific status frame
+(skipping over any other frame that arrives first, e.g. an incoming RX) and sets
+`SendResult::acknowledged` from `ZBTxStatusResponse::isSuccess()`.
+
+**`poll()` is genuinely non-blocking**: `xbee_.readPacket()` (the no-argument form) returns
+immediately whether or not a frame is waiting — matches `Transport::poll()`'s contract exactly,
+same as the other two backends' polling approach.
+
+**`maxPayloadBytes()` = 84** — Digi's documented unfragmented RF payload limit for XBee S2C ZB
+firmware.
+
+**`broadcastAddress()`** returns `Address::broadcast(AddressKind::XBee64_16)`, which already
+matches the standard ZigBee broadcast address (`0x000000000000FFFF`, `addr16=0xFFFE`) — this is
+what `pingpong`'s Zigbee gateway env sends to, sidestepping any address-bootstrap step entirely
+(unlike ESP-NOW's MAC exchange): the node just replies to `received->source`, which the backend
+already populates from the actual sender's address.
+
+**Open risk this backend does not and cannot resolve in code**: two factory-default XBee S2C
+modules do **not** form a network together (both default to Router). One module must be set to
+Coordinator (AT command `CE=1`, via XCTU) before any of this will actually communicate over the
+air — a one-time manual module-configuration step, not something `setup()` can do at runtime.
+
+**RSSI/SNR left `nullopt`**, same gap as ESP-NOW: the ZB RX frame doesn't carry signal quality
+in-band; a separate `DB` AT query after each receive would be needed, not implemented in this pass.
 
 ## Native-vs-library verification (exposé step 2)
 
@@ -310,7 +348,7 @@ bound can't be chosen correctly before the example has actually run once.
 | M5 | LoRa native-vs-library harness. | Plausible numbers from `examples/verify_native_lora`. |
 | M5.5 | (optional) Promote to `test/test_lora_device/`. | Same pattern as M3.5. |
 | M6 | This document, README quickstart per backend, Doxygen audit. | Human review. |
-| M7 | Zigbee/XBee backend — explicitly out of scope for this pass, listed as the natural next step. | — |
+| M7 | Zigbee/XBee backend — implemented (`ZigbeeTransport`, `andrewrapp/xbee-arduino`). | Compiles/links for `zigbee_gateway`/`zigbee_node` in the examples repo. Real send/receive needs the XBee actually wired and one module set to Coordinator via XCTU — both pending as of this pass. |
 
 ## Open risks (flagged, not silently resolved)
 

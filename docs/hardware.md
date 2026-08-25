@@ -23,6 +23,20 @@ max) or SPI (5 Mb/s burst).
 **Implication**: needs pairing with a host ESP32 board (e.g. via UART) — unlike the other two
 radios, it is not itself an MCU+radio unit.
 
+**T-Beam v1.2 wiring** (settled for this project's actual hardware): XBee VCC → the T-Beam's 3V3
+pin (right header, last pin — not the left header's 5V pin, which would exceed the XBee's 3.6V
+max); GND → either header; XBee DOUT → T-Beam GPIO13 (as UART RX); XBee DIN → T-Beam GPIO25 (as
+UART TX). GPIO13/25 were confirmed free on this board (not used by LoRa/I2C/GPS/PMU — only
+reserved by an optional TFT add-on this board doesn't have) via `meshtastic/firmware`'s own T-Beam
+variant definition. The OLED display sits directly over this header on the physical board, so
+wiring in practice means soldering to the header's solder joints on the underside of the PCB
+rather than plugging a connector in from the top.
+
+**Prerequisite before two modules will talk to each other**: XBee ZB firmware defaults every
+module to Router — two factory-default modules do **not** automatically form a network. One
+module must be set to Coordinator (AT command `CE=1`) via XCTU first; this is one-time module
+configuration, not something firmware can do at runtime.
+
 ## LoRa — LilyGO T-Beam Meshtastic
 
 An integrated ESP32 dev board with an onboard LoRa module. The variant to use is the **SX1278,
