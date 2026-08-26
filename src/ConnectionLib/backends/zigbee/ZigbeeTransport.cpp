@@ -4,6 +4,8 @@
 
 #include <Arduino.h>
 
+#include <utility>
+
 namespace connectionlib {
 
 ZigbeeTransport::ZigbeeTransport(ZigbeeConfig config) : config_(config), dutyCycle_(config_.dutyCycle) {}
@@ -41,8 +43,15 @@ SendResult ZigbeeTransport::send(const Address &destination, const uint8_t *payl
         return result;
     }
 
+    // Pass the peer's 16-bit address through rather than using xbee-arduino's shorter
+    // ZBTxRequest(addr64, payload, len) constructor, which hardcodes addr16 to
+    // ZB_BROADCAST_ADDRESS (0xFFFE) = "unknown, go discover it" and so discards the addr16 that
+    // Address::xbee() carries and poll() fills in from the sender. Measured against hardware
+    // both forms deliver, so this is about not throwing away known information rather than a
+    // correctness fix. Broadcast is unaffected: Address::broadcast(XBee64_16) already sets 0xFFFE.
     XBeeAddress64 addr64(destXBee->addr64);
-    ZBTxRequest request(addr64, const_cast<uint8_t *>(payload), static_cast<uint8_t>(len));
+    ZBTxRequest request(addr64, destXBee->addr16, ZB_BROADCAST_RADIUS_MAX_HOPS, ZB_TX_UNICAST,
+                        const_cast<uint8_t *>(payload), static_cast<uint8_t>(len), DEFAULT_FRAME_ID);
 
     uint32_t t0 = micros();
     xbee_.send(request);
@@ -57,12 +66,18 @@ SendResult ZigbeeTransport::send(const Address &destination, const uint8_t *payl
         if (remaining <= 0 || !xbee_.readPacket(remaining)) {
             break;
         }
-        if (xbee_.getResponse().getApiId() == ZB_TX_STATUS_RESPONSE) {
+        uint8_t apiId = xbee_.getResponse().getApiId();
+        if (apiId == ZB_TX_STATUS_RESPONSE) {
             ZBTxStatusResponse txStatus;
             xbee_.getResponse().getZBTxStatusResponse(txStatus);
             acknowledged = txStatus.isSuccess();
             statusSeen = true;
             break;
+        }
+        if (apiId == ZB_RX_RESPONSE && !pendingRx_) {
+            // Hold it for the next poll() rather than dropping it. The peer's reply commonly
+            // lands inside this window, since a broadcast status takes ~1s to resolve.
+            pendingRx_ = buildReceived();
         }
     }
     uint32_t t1 = micros();
@@ -78,15 +93,7 @@ SendResult ZigbeeTransport::send(const Address &destination, const uint8_t *payl
     return result;
 }
 
-std::optional<ReceivedMessage> ZigbeeTransport::poll() {
-    xbee_.readPacket();   // true non-blocking form: returns immediately either way
-    if (!xbee_.getResponse().isAvailable()) {
-        return std::nullopt;
-    }
-    if (xbee_.getResponse().getApiId() != ZB_RX_RESPONSE) {
-        return std::nullopt;   // e.g. a stray TX status frame - not a received message
-    }
-
+ReceivedMessage ZigbeeTransport::buildReceived() {
     ZBRxResponse rx;
     xbee_.getResponse().getZBRxResponse(rx);
 
@@ -98,6 +105,23 @@ std::optional<ReceivedMessage> ZigbeeTransport::poll() {
     // rssiDbm/snrDb left nullopt: the ZB RX frame doesn't carry signal quality - a separate `DB`
     // AT query would be needed after the fact, not implemented in this pass.
     return msg;
+}
+
+std::optional<ReceivedMessage> ZigbeeTransport::poll() {
+    if (pendingRx_) {   // arrived while send() was waiting for its TX status
+        ReceivedMessage msg = std::move(*pendingRx_);
+        pendingRx_.reset();
+        return msg;
+    }
+
+    xbee_.readPacket();   // true non-blocking form: returns immediately either way
+    if (!xbee_.getResponse().isAvailable()) {
+        return std::nullopt;
+    }
+    if (xbee_.getResponse().getApiId() != ZB_RX_RESPONSE) {
+        return std::nullopt;   // e.g. a stray TX status frame - not a received message
+    }
+    return buildReceived();
 }
 
 Address ZigbeeTransport::broadcastAddress() const {

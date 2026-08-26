@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 
 #include "ConnectionLib/DutyCycleGuard.hpp"
 #include "ConnectionLib/Transport.hpp"
@@ -50,13 +51,23 @@ struct ZigbeeConfig {
  * because no status frame is ever emitted. Confirmed against hardware; see docs/hardware.md.
  *
  * Prerequisites this class cannot satisfy for you - one-time module configuration, not something
- * ConnectionLib does at runtime:
- *   - AP=1 (API mode). Factory default is 0 (Transparent), in which the module would transmit
- *     these API frames as raw payload: no ack, no error, silent failure.
+ * ConnectionLib does at runtime. All of them fail the same way, as a send() timeout on a link
+ * that looks correctly configured, so check them in this order:
+ *   - Antennas fitted. These modules are the U.FL variant and radiate essentially nothing
+ *     without one, however close together they sit.
+ *   - AP=2, NOT AP=1. xbee-arduino escapes 0x7E/0x7D/0x11/0x13 on every transmitted byte
+ *     unconditionally, i.e. it assumes escaped API mode. An AP=1 module silently discards any
+ *     frame containing one of those, with no status frame and no error. It presents as
+ *     intermittent rather than broken: broadcasts to 0x...FFFF contain no escapable byte and
+ *     work, while every unicast fails, since all Digi addresses begin 0013A200.
  *   - CE=1 on exactly one module - conventionally whichever calls send() as the initiator.
  *     Every module defaults to Router, and two Routers never form a network.
- * Both can be set over the module's own UART from the host MCU (+++, then ATAP1/ATCE1/ATWR/ATCN);
- * XCTU is not required, which matters when working headless.
+ *   - ID (PAN id) set explicitly; the default 0 pairs non-deterministically.
+ * AP/CE/ID are all settable over the module's own UART from the host MCU (from AP=0 via +++ and
+ * ATAP2/ATCE1/ATID/ATWR/ATCN; from AP!=0 via 0x08 AT-command frames, since command mode no
+ * longer exists). XCTU is only needed for changing the firmware itself.
+ *
+ * See docs/hardware.md for the full bring-up procedure and the evidence behind each of these.
  */
 class ZigbeeTransport : public Transport {
   public:
@@ -77,13 +88,28 @@ class ZigbeeTransport : public Transport {
 
   private:
     static constexpr size_t kMaxPayload = 84;         // XBee S2C ZB firmware unfragmented RF payload limit
-    static constexpr uint32_t kTxStatusWaitMs = 500;   // how long to wait for the delivery ack after a send
+    // How long to wait for the delivery ack after a send. Measured on hardware: the first
+    // transmission of a session takes >500ms while the stack sets up a route, every one after
+    // it takes ~1ms. At the previous 500ms budget that made packet #1 of every run report
+    // Timeout on a perfectly good link.
+    static constexpr uint32_t kTxStatusWaitMs = 1500;
+
+    /** @brief Parse the frame currently held by xbee_ as a ReceivedMessage. */
+    ReceivedMessage buildReceived();
 
     ZigbeeConfig config_;
     DutyCycleGuard dutyCycle_;
     HardwareSerial serial_{2};
     XBee xbee_;
     int lastError_ = 0;
+
+    // A message that arrived while send() was waiting for its TX status, held over for the next
+    // poll(). Without this the reply to a just-sent request is routinely lost: a ZB broadcast
+    // status takes ~1s to come back, which is ample time for the peer to answer, and send()
+    // would otherwise discard that frame while scanning for its own status.
+    // Single-slot on purpose: one in-flight request/response is the pattern this library
+    // targets. A second message arriving inside the same send() window is still dropped.
+    std::optional<ReceivedMessage> pendingRx_;
 };
 
 }   // namespace connectionlib

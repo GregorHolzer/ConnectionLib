@@ -47,46 +47,104 @@ Two SMT-only straps are worth knowing about, because either makes a module look 
 in fact perfectly healthy: pin 15 `SPI_SSEL` held low at reset selects SPI instead of UART, and
 pin 12 `SPI_ATTN/BOOTMODE` is documented "do not tie low on reset" — low means bootloader mode.
 
-**Prerequisites before two modules will talk to each other.** None of these can be done from
-firmware at runtime; all are one-time module configuration.
+### Antennas are not optional — fit them first
 
-1. **`AP=1` (API mode).** `ZigbeeTransport` speaks only API frames. Factory default is `AP=0`
-   (Transparent), in which the module treats those frames as ordinary payload and transmits them
-   verbatim — no ack, no error, and a failure indistinguishable from bad wiring. Confirmed as the
-   default on two independent modules during bring-up.
-2. **`CE=1` on exactly one module.** Every module defaults to Router, so two factory-default
-   modules never form a network at all.
-3. **ZB (ZigBee) firmware, not 802.15.4** — see the blocker below.
+These are the **U.FL variant**: no antenna on the module itself, the whole RF output goes to
+that small round connector. With it empty essentially nothing radiates, and two modules will not
+find each other even sitting 10 cm apart. Any generic 2.4 GHz U.FL/IPEX antenna works, one per
+module; they clip on and unclip just as easily, so check seating if a working link later dies.
 
-Both `AP` and `CE` can be set over the module's UART from the host MCU (enter command mode with
-`+++`, then `ATAP1` / `ATCE1` / `ATWR` / `ATCN`). XCTU is *not* required for this, which matters
-when working headless — XCTU is a Java GUI and expects the module on a USB adapter.
+This is the *first* thing to verify, because the failure mode looks like everything else. Both
+modules answer AT commands normally, the coordinator forms a PAN and reports `AI=0x00`, and the
+node scans forever reporting `AI=0x21` "scan found no PANs". Every symptom points at
+configuration; none of it is.
 
-**Blocker found during bring-up: the modules ship with 802.15.4 firmware, not ZigBee firmware.**
-XBee S2C hardware runs either, and the two speak completely different API frame sets. Check `VR`:
-a `2xxx` value (ours read `VR=2003`, `HV=2246`) is the 802.15.4 series; ZB firmware reports `4xxx`.
-The practical symptom is oddly specific — AT command frames (`0x08`) are answered normally, so the
-module looks alive and correctly configured, but transmit requests are met with total silence:
+Related trap: a transmit status of success only ever means *sent*, never *received*. A broadcast
+returns `0x00` quite happily into a dead antenna.
 
-| Operation            | ZigBee firmware      | 802.15.4 firmware        |
-|----------------------|----------------------|--------------------------|
-| Transmit             | `ZBTxRequest` `0x10` | `0x00` (64-bit) / `0x01` (16-bit) |
-| Receive              | `ZBRxResponse` `0x90`| `0x80` / `0x81`          |
-| Transmit status      | `0x8B`               | `0x89`                   |
-| Max payload          | 84 bytes             | 100 bytes                |
-| Ack semantics        | network-layer (APS)  | MAC-layer                |
+### Module prerequisites
 
-Verified directly against the hardware: a hand-built `0x10` frame gets no response at all, while
-`0x00` and `0x01` both return `0x89` with `status=0x00` (success). `MY=0` on every module is
-another tell — in 802.15.4 `MY` is the 16-bit source address and defaults to 0.
+One-time module configuration; none of it can be done from firmware at runtime.
 
-This is not merely an implementation detail. 802.15.4 is the PHY/MAC layer; ZigBee is the
-mesh/network layer on top, and that network layer is exactly what the RQ1/RQ2 comparison is
-meant to exercise. Either the modules get reflashed to ZB firmware (XCTU, and an XBee USB adapter
-— this cannot go through the ESP32 passthrough), or the backend is rewritten against 802.15.4 and
-renamed, in which case the APS-ack claim and the 84-byte limit both have to be corrected.
-**Undecided as of this pass; `ZigbeeTransport` remains ZB-only and therefore non-functional on
-the current hardware.**
+1. **ZB (ZigBee) firmware, not 802.15.4** — see the conversion procedure below.
+2. **`AP=2` (API mode *with escaping*).** Not `AP=1`. See the escaping note below — this one
+   costs a long debugging session if you get it wrong.
+3. **`CE=1` on exactly one module.** Every module defaults to Router, and two Routers never form
+   a network at all.
+4. **Set `ID` (PAN id) explicitly.** The post-flash default `ID=0` means the coordinator picks a
+   random PAN and routers join whatever they find, which pairs non-deterministically.
+
+`AP`, `CE` and `ID` are all settable over the module's own UART from the host MCU — XCTU is not
+needed for these, which matters when working headless. From `AP=0` use command mode (`+++`, then
+`ATCE1`/`ATID3332`/`ATAP2`/`ATWR`/`ATCN`); from `AP!=0` command mode no longer exists and you must
+use `0x08` AT-command API frames instead.
+
+### `AP=2`, not `AP=1` — xbee-arduino always escapes
+
+`andrewrapp/xbee-arduino` escapes `0x7E`, `0x7D`, `0x11` and `0x13` on every transmitted byte
+unconditionally (`XBee::sendByte`), i.e. it assumes escaped API mode. On an `AP=1` module any
+frame containing one of those bytes is malformed and gets **silently discarded — no status
+frame, no error**, so `send()` simply times out.
+
+What makes this vicious is that it is *data-dependent*, so it looks intermittent rather than
+broken. Broadcasts worked throughout our bring-up purely by luck:
+
+```
+broadcast: 7E 00 12 10 01 00 00 00 00 00 00 FF FF FF FE 00 00 50 49 4E 47 C5   <- no escapable byte
+unicast:   7E 00 13 10 01 00 13 A2 00 42 03 5C 03 ...                          <- 0x13 in length AND address
+```
+
+Every Digi address starts `0013A200`, so *every* unicast to a real module contains `0x13` and
+fails, while broadcast traffic sails through. Proven by hand-building the identical frame and
+writing it to the same UART unescaped: `0x8B` status in ~50 ms, versus a 1500 ms timeout through
+`xbee_.send()`.
+
+Receive is unaffected in practice: an `AP=1` module sends unescaped, and xbee-arduino's parser
+only unescapes when it actually sees `0x7D`. So `poll()` appears to work fine, which further
+misdirects the diagnosis.
+
+### Converting 802.15.4 firmware to ZigBee
+
+The modules shipped running **802.15.4** firmware, which implements a completely different API
+frame set and ignores the ZB frames `ZigbeeTransport` sends. Check `AT VR`: `2xxx` is 802.15.4
+(ours read `VR=2003`, `HV=2246`), `4xxx` is ZB.
+
+| Operation       | ZigBee firmware       | 802.15.4 firmware                 |
+|-----------------|-----------------------|-----------------------------------|
+| Transmit        | `ZBTxRequest` `0x10`  | `0x00` (64-bit) / `0x01` (16-bit) |
+| Receive         | `ZBRxResponse` `0x90` | `0x80` / `0x81`                   |
+| Transmit status | `0x8B`                | `0x89`                            |
+| Max payload     | 84 bytes              | 100 bytes                         |
+| Ack semantics   | network-layer (APS)   | MAC-layer                         |
+
+Same tell as the escaping bug — AT command frames are answered normally so the module looks
+healthy, but transmit requests draw complete silence. `MY=0` on a supposedly-joined module is
+another hint: in 802.15.4 `MY` is the 16-bit source address and defaults to 0.
+
+Conversion needs **XCTU and a USB-TTL adapter** (a CP2102 at 3.3 V works; it cannot be done
+through the ESP32 passthrough). In XCTU: Update Firmware → product family `XB24C`, function set
+**ZigBee**, newest version. Notes from doing it on Arch:
+
+- XCTU is in the AUR (`yay -S xctu`) and is x86_64 only, so it will not run on an aarch64 Pi.
+- Serial devices belong to group **`uucp`** on Arch, not `dialout`. Without membership XCTU
+  cannot open the port and says so unhelpfully.
+- XCTU decrypts firmware *into its own install directory*, which is root-owned, and fails with
+  `Error decrypting the firmware file ... (Permission denied)`. Fix:
+  `sudo chgrp -R wheel /opt/xctu/radio_firmwares` (the dirs are already group-writable). A
+  package upgrade resets this.
+- **Closing the XCTU window does not exit XCTU** — the Java process keeps running and holds the
+  serial port, so anything else reading it sees nothing.
+- Flashing wipes the AT config: `AP`, `CE` and `ID` all return to defaults and must be re-applied.
+
+### This project's modules
+
+| Role        | 64-bit address      | On T-Beam (USB serial) | `VR`   |
+|-------------|---------------------|------------------------|--------|
+| Coordinator | `0013A200 42035C03` | `573C000618`           | `4061` |
+| Node        | `0013A200 42035B39` | `5748001588`           | `4064` |
+
+The differing firmware builds are benign — `ZS` (stack profile) and `EE` (encryption) match,
+which is what actually has to agree for joining to work.
 
 ## LoRa — LilyGO T-Beam Meshtastic
 

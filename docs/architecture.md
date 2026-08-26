@@ -296,7 +296,7 @@ struct ZigbeeConfig {
 
 **Ack: a real network-layer ack, unlike LoRa's fire-and-forget.** `ZBTxStatusResponse` reports
 whether the destination actually received the frame, with the module's own mesh retries already
-applied — `send()` waits (bounded, `kTxStatusWaitMs = 500`) for that specific status frame
+applied — `send()` waits (bounded, `kTxStatusWaitMs = 1500`) for that specific status frame
 (skipping over any other frame that arrives first, e.g. an incoming RX) and sets
 `SendResult::acknowledged` from `ZBTxStatusResponse::isSuccess()`.
 
@@ -313,31 +313,44 @@ what `pingpong`'s Zigbee gateway env sends to, sidestepping any address-bootstra
 (unlike ESP-NOW's MAC exchange): the node just replies to `received->source`, which the backend
 already populates from the actual sender's address.
 
-**Blocker found during hardware bring-up: this backend does not work on the project's actual
-modules, which run 802.15.4 firmware rather than ZB firmware.** The two firmwares share the
-hardware but not the API frame set — 802.15.4 uses `0x00`/`0x01` to transmit, `0x89` for status
-and `0x80`/`0x81` to receive, and ignores the `0x10` ZB frames this backend sends. Verified
-directly: a hand-built `0x10` frame draws no response at all, while `0x00`/`0x01` return `0x89`
-with `status=0x00`. Check `AT VR` — `4xxx` is ZB, `2xxx` (ours: `VR=2003`, `HV=2246`) is 802.15.4.
-The mismatch is easy to misdiagnose, because AT command frames are still answered normally, so the
-module presents as alive and correctly configured while every `send()` returns `Timeout`.
-Resolving it means either reflashing the modules to ZB firmware (XCTU plus an XBee USB adapter;
-it cannot be done through the ESP32 passthrough) or retargeting the backend at 802.15.4 — the
-latter also invalidates the APS-ack claim above and the 84-byte payload limit. See
-[`hardware.md`](hardware.md) for the full evidence. Undecided; nothing in the code has been
-changed to accommodate 802.15.4.
+**Hardware-verified**, after a bring-up that turned up three separate causes of the same
+symptom — `send()` returning `Timeout` on a link that looked perfectly configured. All three are
+environmental rather than defects in this class, and all are written up with evidence in
+[`hardware.md`](hardware.md):
 
-**Open risks this backend does not and cannot resolve in code** — one-time manual module
-configuration, not something `setup()` can do at runtime:
+1. **No antennas fitted.** The modules are the U.FL variant and nothing radiates until an
+   antenna is clipped on. Cost the most time, because every symptom pointed at configuration.
+2. **802.15.4 firmware, not ZB.** Different API frame set entirely; the `0x10` frames this
+   backend sends are simply ignored. Reflashed via XCTU to `VR` 4061/4064.
+3. **`AP=1` instead of `AP=2`.** See below — the one with real implications for this code.
 
-- **`AP=1`** (API mode). Factory default is `AP=0` (Transparent), in which the module transmits
-  these API frames as ordinary payload — no ack, no error, and a failure mode indistinguishable
-  from bad wiring. Confirmed as the default on two independent modules.
-- **`CE=1` on exactly one module.** Every module defaults to Router, so two factory-default
-  modules never form a network at all.
+**`AP=2` is mandatory, and the reason is subtle.** xbee-arduino escapes `0x7E`/`0x7D`/`0x11`/
+`0x13` on every byte it transmits (`XBee::sendByte`), unconditionally — it assumes escaped API
+mode. An `AP=1` module silently discards any frame containing one of those bytes, returning no
+status at all. Because it is data-dependent it presents as intermittent: broadcasts to
+`0x000000000000FFFF` contain no escapable byte and always worked, while *every* unicast failed,
+since all Digi addresses begin `0013A200` and therefore always contain `0x13`. Confirmed by
+hand-writing the identical frame unescaped to the same UART — `0x8B` in ~50 ms versus a full
+timeout through `xbee_.send()`. Receive is unaffected (the parser only unescapes on seeing
+`0x7D`), so `poll()` working normally actively misdirects the diagnosis.
 
-Both are settable over the module's own UART from the host MCU (`+++`, then
-`ATAP1`/`ATCE1`/`ATWR`/`ATCN`) — XCTU is not required, which matters for headless work.
+Three adjustments came out of this:
+
+- **`send()` no longer discards frames received while it waits.** Its wait loop skips over
+  non-status frames looking for the TX status, and used to drop them on the floor. Because a
+  broadcast status takes ~1 s to resolve, the peer's reply routinely lands *inside* that window
+  — so a request/response exchange lost the response every single time, before `poll()` ever
+  ran. This made `pingpong` retry sequence 0 forever while the node happily reported sending
+  each `pong`. Any `ZB_RX_RESPONSE` seen during the wait is now held in `pendingRx_` and
+  returned by the next `poll()`. Single-slot: one in-flight request/response is the pattern
+  this library targets, and a second message inside the same window is still dropped.
+- **`kTxStatusWaitMs` 500 → 1500.** ZB *broadcast* status genuinely takes ~1 s; only unicast is
+  fast (~50 ms). At 500 ms the first packet of every run reported `Timeout`, and worse, each
+  later `send()` picked up the *previous* send's late status frame out of the buffer and
+  reported a bogus `took=1ms`. Raising the budget fixed a correctness bug, not just a timing one.
+- **`send()` passes the peer's `addr16`** rather than using xbee-arduino's 3-arg `ZBTxRequest`,
+  which hardcodes `ZB_BROADCAST_ADDRESS`. Both forms deliver, measured — this is about not
+  discarding information `Address::xbee()` already carries.
 
 **RSSI/SNR left `nullopt`**, same gap as ESP-NOW: the ZB RX frame doesn't carry signal quality
 in-band; a separate `DB` AT query after each receive would be needed, not implemented in this pass.
@@ -369,7 +382,7 @@ bound can't be chosen correctly before the example has actually run once.
 | M5 | LoRa native-vs-library harness. | Plausible numbers from `examples/verify_native_lora`. |
 | M5.5 | (optional) Promote to `test/test_lora_device/`. | Same pattern as M3.5. |
 | M6 | This document, README quickstart per backend, Doxygen audit. | Human review. |
-| M7 | Zigbee/XBee backend — implemented (`ZigbeeTransport`, `andrewrapp/xbee-arduino`). | Compiles/links for `zigbee_gateway`/`zigbee_node` in the examples repo. **Hardware bring-up done and blocked**: wiring verified, both modules powered, associated (`AI=0`, same PAN/channel) and set to `AP=1`/`CE=1`, but they run 802.15.4 firmware, not ZB — so every `send()` times out. See the Zigbee backend section and [`hardware.md`](hardware.md). |
+| M7 | Zigbee/XBee backend — implemented (`ZigbeeTransport`, `andrewrapp/xbee-arduino`). | **Hardware-verified**: 100/100 ping-pong exchanges over a real ZigBee link, both directions acked. Required antennas fitted (U.FL variant), reflash 802.15.4 → ZB firmware, and `AP=2`/`CE=1`/explicit `ID` on the modules — see [`hardware.md`](hardware.md). |
 
 ## Open risks (flagged, not silently resolved)
 
@@ -385,13 +398,7 @@ bound can't be chosen correctly before the example has actually run once.
 4. **`std::vector`/heap use** in `EspNowConfig.peers` and `ReceivedMessage.payload` — a deliberate
    simplicity-over-embedded-purism trade-off (ESP32 has ample heap for this workload) rather than
    fixed-capacity containers.
-5. **Zigbee backend is unusable on the project's current hardware** — the XBee S2C modules run
-   802.15.4 firmware, whose API frame set `ZigbeeTransport` does not implement. This is a
-   direction decision, not a bug: reflash the modules to ZB firmware and keep measuring ZigBee's
-   mesh/network layer, or retarget the backend at 802.15.4 and accept that the benchmark then
-   compares a MAC layer rather than a mesh. The latter also affects the exposé's RQ1/RQ2 framing.
-   Details and evidence in [`hardware.md`](hardware.md).
-6. **`library.json` license/publishing target** left open — MIT is a reasonable default (matches
+5. **`library.json` license/publishing target** left open — MIT is a reasonable default (matches
    RadioLib's own licensing) unless the user wants something else; whether this ever gets published
    to the PlatformIO registry vs. just referenced as a git dependency affects how much manifest
    polish is worth doing now.
