@@ -369,16 +369,50 @@ be promoted to a Unity device test (`test/test_espnow_device/`, `test/test_lora_
 `TEST_ASSERT` bound as a regression guard — that's milestone M3.5/M5.5, not part of M3/M5, since the
 bound can't be chosen correctly before the example has actually run once.
 
+## Hardware verification: all three backends
+
+All three transports now pass the `pingpong` example on real hardware — two LilyGO T-Beams,
+each running gateway and node in turn, 100 request/response exchanges per backend. This is the
+first pass in which every backend has been exercised on hardware rather than only compiled.
+
+| Backend  | Result | Exchanges | Retries | Round trip (ping→pong) |
+|----------|--------|-----------|---------|------------------------|
+| ESP-NOW  | PASS   | 100/100   | 0       | ≤5 ms *(at the harness resolution floor)* |
+| LoRa     | PASS   | 100/100   | 0       | 207–212 ms, median 212 |
+| Zigbee   | PASS   | 100/100   | 2       | not meaningfully measurable — see below |
+
+**These are a functional check, not a benchmark.** One run per backend, a single ~8-byte
+payload, both boards on the same bench. The exposé's actual measurements are the
+native-vs-library harnesses above plus a future benchmark app; nothing here is a substitute.
+
+Three caveats without which the numbers mislead:
+
+- **ESP-NOW's 5 ms is the floor, not a measurement.** `gatewayTick` polls with `delay(5)`
+  (`PingPong.cpp`), so 5 ms is the smallest value the harness can report. Every one of the 100
+  exchanges read exactly 5 ms, which means the true figure is *somewhere below* it.
+- **Zigbee's round trip reads 0 ms, and that is an artifact.** A ZB broadcast status takes ~1 s
+  to resolve, and the node's reply arrives inside that window, so `send()` buffers it in
+  `pendingRx_` and the first `poll()` afterwards returns it immediately. The harness starts its
+  round-trip timer only after `send()` returns, so it measures nothing. The real cost sits
+  inside `send()`: measured directly, gateway broadcast ~950–1020 ms, node unicast reply ~50 ms.
+  Zigbee is not "faster than ESP-NOW"; it is roughly two orders of magnitude slower per
+  exchange, and the metric simply fails to see it.
+- **LoRa's spread is genuinely tiny** (207–212 ms) because at SF9/BW125/CR4:7 the time-on-air
+  dominates and barely varies. That one is a real measurement.
+
+Retries are the more comparable reliability signal here: ESP-NOW and LoRa completed with none,
+Zigbee needed 1–2 across runs.
+
 ## Build order
 
 | # | Milestone | Verification |
 |---|---|---|
 | M0 | Repo scaffolding: `library.json`, `platformio.ini`, directory layout, `.clang-format` copied from sensor-system. | `pio run` against a trivial stub confirms manifest+layout are valid. |
 | M1 | Core value types: `Address`, `LinkMetrics`/`SendResult`/`ReceivedMessage`, `DutyCycleGuard`. Pure C++17, no hardware. | `pio test -e native` runs `test_address`/`test_duty_cycle` on the host — no ESP32 needed; `DutyCycleGuard`'s ring-buffer math is fully host-testable with synthetic clocks. |
-| M2 | `EspNowTransport` — has an existing reference implementation to validate against, so built before the unfamiliar LoRa backend. | Two ESP32 boards, `examples/espnow_satellite`+`espnow_gateway`; confirm payload arrives and `acknowledged` flips correctly with peer in/out of range. |
+| M2 | `EspNowTransport` — has an existing reference implementation to validate against, so built before the unfamiliar LoRa backend. | **Hardware-verified**: `pingpong` ESP-NOW pair, 100/100 exchanges, 0 retries. |
 | M3 | ESP-NOW native-vs-library harness. | Plausible, explainable overhead numbers from `examples/verify_native_espnow`. |
 | M3.5 | (optional) Promote to `test/test_espnow_device/` with bound assertions. | `pio test` passes on hardware. |
-| M4 | `LoRaTransport` — RadioLib, T-Beam pins, addressing frame, duty-cycle integration. | Two T-Beam boards, `examples/lora_satellite`+`lora_gateway`; confirm transport works, `rssiDbm`/`snrDb` populate, and rapid-fire `send()` eventually trips `DutyCycleExceeded`. |
+| M4 | `LoRaTransport` — RadioLib, T-Beam pins, addressing frame, duty-cycle integration. | **Hardware-verified**: `pingpong` LoRa pair, 100/100 exchanges, 0 retries, ~212 ms round trip. |
 | M5 | LoRa native-vs-library harness. | Plausible numbers from `examples/verify_native_lora`. |
 | M5.5 | (optional) Promote to `test/test_lora_device/`. | Same pattern as M3.5. |
 | M6 | This document, README quickstart per backend, Doxygen audit. | Human review. |
