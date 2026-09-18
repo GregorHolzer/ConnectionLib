@@ -28,7 +28,9 @@ struct ZigbeePinConfig {
 struct ZigbeeConfig {
     ZigbeePinConfig pins{};
     uint32_t baud = 9600;   // XBee factory default
-    DutyCycleConfig dutyCycle{100.0f, 3'600'000};   // 2.4GHz ISM: no ETSI duty-cycle mandate
+    // Same reasoning as EspNowConfig: ETSI EN 300 328 imposes no duty-cycle limit, and its 10%
+    // medium-utilisation cap applies only to non-adaptive equipment - 802.15.4 uses CSMA/CA.
+    DutyCycleConfig dutyCycle{100.0f, 3'600'000};
 };
 
 /**

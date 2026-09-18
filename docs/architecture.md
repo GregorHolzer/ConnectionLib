@@ -103,21 +103,21 @@ struct EspNowConfig {
     std::vector<Address> peers;
     uint8_t wifiChannel = 0;         // 0 = use current STA channel
     bool encrypt = false;
-    DutyCycleConfig dutyCycle{100.0f, 3'600'000};   // 2.4GHz ISM: no ETSI duty-cycle mandate
+    DutyCycleConfig dutyCycle{100.0f, 3'600'000};   // EN 300 328: no limit (CSMA/CA = adaptive)
 };
 struct LoRaPinConfig {               // T-Beam v1.1 classic defaults, override for other boards
     int sck = 5, miso = 19, mosi = 27, nss = 18, reset = 23, dio0 = 26;
 };
 struct LoRaConfig {
     LoRaPinConfig pins{};
-    float frequencyMHz = 433.0f;     // EU SX1278 variant
+    float frequencyMHz = 433.2f;     // inside the 433.050-434.790MHz band edge
     float bandwidthKHz = 125.0f;
     uint8_t spreadingFactor = 9;
     uint8_t codingRate = 7;
-    int8_t txPowerDbm = 17;
+    int8_t txPowerDbm = 7;           // 10mW e.r.p. ceiling, less antenna gain
     uint16_t preambleLength = 8;
     uint16_t nodeId = 0;             // this node's software address
-    DutyCycleConfig dutyCycle{1.0f, 3'600'000};  // PLACEHOLDER — exact ETSI 433MHz figure unverified, see risks
+    DutyCycleConfig dutyCycle{10.0f, 3'600'000};  // ERC-REC 70-03 h1.3; see methodology §3.1
 };
 ```
 
@@ -217,7 +217,7 @@ only as LoRa's pre-flight `canTransmit()` estimate.
 busy-wait (wastes battery) or need its own sleep policy — out of place in a general transport
 library. It also keeps "duty-cycle throttled" distinguishable from "link failed" in the data a
 future benchmark app collects for RQ1. `EspNowConfig`'s default duty cycle is effectively unlimited
-(100%, 2.4GHz ISM has no ETSI mandate); a future benchmark app can still configure a matching
+(100%; EN 300 328 sets no duty-cycle limit for adaptive equipment); a future benchmark app can still configure a matching
 artificial cap on ESP-NOW to create a level playing field against LoRa's regulatory one.
 
 ## ESP-NOW backend
@@ -290,7 +290,7 @@ struct ZigbeePinConfig {              // T-Beam wiring
 struct ZigbeeConfig {
     ZigbeePinConfig pins{};
     uint32_t baud = 9600;             // XBee factory default
-    DutyCycleConfig dutyCycle{100.0f, 3'600'000};   // 2.4GHz ISM: no ETSI duty-cycle mandate
+    DutyCycleConfig dutyCycle{100.0f, 3'600'000};   // EN 300 328: no limit (CSMA/CA = adaptive)
 };
 ```
 
@@ -423,9 +423,14 @@ Zigbee needed 1–2 across runs.
 1. **ESP-NOW RSSI/SNR isn't natively exposed by `esp_now.h`.** A promiscuous-mode sniffer callback
    workaround exists but is version-dependent and fiddly. Shipping `nullopt` for now with a
    documented TODO; a separate spike if the benchmark app later needs it.
-2. **Exact ETSI duty-cycle % for the T-Beam's 433MHz sub-band is unverified.** `LoRaConfig`'s
-   default (1%, 1h window) is a placeholder marked TODO/citation-needed in code, not asserted as
-   regulatory fact.
+2. ~~**Exact ETSI duty-cycle % for the T-Beam's 433MHz sub-band is unverified.**~~ **Resolved.**
+   Verified against ETSI EN 300 220-2 and CEPT ERC-REC 70-03 Annex 1 band h1.3: 433.050-434.790MHz
+   at ≤10mW e.r.p. with a ≤10% duty cycle. The 1% default was a placeholder roughly ten times
+   stricter than required; `LoRaConfig` now uses 10%. Verifying it also turned up two genuine
+   conformance bugs in the same struct — a 433.0MHz centre frequency that put a 125kHz signal
+   *below* the 433.050MHz band edge, and `txPowerDbm = 17` (50mW) against a 10mW ceiling. Both
+   fixed. The full parameter set and its citations are in
+   [`measurement-methodology.md`](measurement-methodology.md) §3.1.
 3. **Thread-safety**: nothing here is safe for concurrent FreeRTOS-task access (matches
    sensor-system's client-side single-`loop()` pattern). If a future gateway use wants
    sensor-system's host-side mutex-protected-queue pattern, that needs to be added deliberately.

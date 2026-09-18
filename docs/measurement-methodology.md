@@ -64,6 +64,41 @@ part of why the comparison is worth running at all.
 | Distance / position | shared grid, all three measured at the same points | §6 |
 | Topology | 1 sender, 1 receiver, single hop | matches the profile |
 
+### 3.1 Fixed radio parameters (EU-conformant)
+
+Every radio parameter below is held **identical across all runs and never relaxed for
+benchmarking convenience**. They are the EU-legal operating point for each band, so the numbers
+the comparison produces are numbers a deployed FORTE node could legally produce. Each value lives
+exactly once in code, as the default in the backend's config struct.
+
+**433 MHz — ETSI EN 300 220-2, CEPT ERC-REC 70-03 Annex 1 band h1.3.** Band 433.050–434.790 MHz,
+≤ 10 mW e.r.p., duty cycle ≤ 10 % across the whole band.
+
+| `LoRaConfig` field | Value | Why this value |
+|---|---|---|
+| `frequencyMHz` | 433.2 | 433.0 with 125 kHz occupied bandwidth spans ~432.94–433.06 MHz — **below the band edge**. 433.2 clears both edges. |
+| `bandwidthKHz` | 125 | Rules out the h1.5 sub-band (434.040–434.790, no duty-cycle limit), whose channel spacing is far narrower, so h1.3's 10 % governs. |
+| `spreadingFactor` | 9 | Held fixed. `ojo2021` treats SF as a swept variable in its own right; sweeping it here would confound the technology comparison. |
+| `codingRate` | 4/7 | Fixed, as above. |
+| `txPowerDbm` | 7 | The limit is 10 mW (10 dBm) **e.r.p.**, so ~2 dBi of antenna gain leaves ~9 dBm radiated. The previous 17 dBm was 50 mW — five times the ceiling. |
+| `dutyCycle` | 10 % / 1 h | = 360 s airtime per hour. Previously 1 %, an unverified placeholder about ten times stricter than the band requires. |
+
+**2.4 GHz (ESP-NOW and Zigbee) — ETSI EN 300 328 V2.2.2.** Band 2400–2483.5 MHz, ≤ 100 mW
+(20 dBm) EIRP, power spectral density ≤ 10 dBm/MHz for non-FHSS. **No duty-cycle limit applies:**
+the standard's 10 % medium-utilisation cap binds only *non-adaptive* equipment, and both ESP-NOW
+(802.11 CSMA/CA) and Zigbee (802.15.4 CSMA/CA) are adaptive. Hence `dutyCycle{100.0f, …}` in
+`EspNowConfig` and `ZigbeeConfig` is correct rather than merely permissive.
+
+**The two bands cannot be power-equalised — 10 mW versus 100 mW is law, not tuning.** Per §6.4
+this is reported as a property of the technology and explicitly *not* normalised away; §3's
+EIRP-normalisation row applies only within a band, which is also all `ojo2021` claimed for it.
+
+**Consequence for run planning.** LoRa's airtime is the binding constraint, and it is a result
+rather than an inconvenience (§6.3). At SF9/BW125/CR4:7 one transmission costs ~198 ms at an 8 B
+payload and ~685 ms at 84 B, so a 100-exchange sweep over 8/16/32/84 B consumes ~148 s of airtime
+per board — comfortably inside the 360 s hourly budget, but only **about two full sweeps per hour
+are legal**. The benchmark runner reports measured airtime against that budget for every run.
+
 ## 4. Output metrics
 
 Availability differs per technology, and a metric unavailable on one radio cannot serve as
@@ -221,7 +256,9 @@ throughput/latency only — partial read) · `corke2010` (application framing on
 
 - Which percentile to claim, given §7's cost table and the number of field positions.
 - Whether energy is measured per-node in situ or on the bench under replayed conditions.
-- Whether the LoRa duty-cycle ceiling is treated as a result (§6.3) or normalised away —
-  this is a framing decision that changes what RQ2 reports.
-- The exact ETSI figure for the 433 MHz sub-band is still an unverified placeholder in
-  `LoRaConfig` (see `architecture.md` open risks).
+**Resolved.** ~~Whether the LoRa duty-cycle ceiling is treated as a result (§6.3) or normalised
+away.~~ Settled as a **result**: the EU parameter set in §3.1 is held fixed and never relaxed for
+benchmarking, and the runner reports measured airtime against the legal budget. ~~The exact ETSI
+figure for the 433 MHz sub-band is an unverified placeholder.~~ Verified against EN 300 220-2 and
+ERC-REC 70-03 h1.3 — 10 %, not the 1 % placeholder; see §3.1, which also corrected an
+out-of-band centre frequency and a TX power five times the legal ceiling.

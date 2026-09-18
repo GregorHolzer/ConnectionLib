@@ -28,19 +28,30 @@ struct LoRaPinConfig {
     int dio0 = 26;
 };
 
-/** @brief Declarative setup for LoRaTransport. */
+/**
+ * @brief Declarative setup for LoRaTransport.
+ *
+ * The radio defaults are the EU-legal operating point for this band, not arbitrary starting
+ * values: ETSI EN 300 220-2 / CEPT ERC-REC 70-03 Annex 1 band h1.3 allows 433.050-434.790MHz at
+ * at most 10mW e.r.p. with a duty cycle of at most 10% across the whole band. They are held fixed
+ * across every measurement run — see docs/measurement-methodology.md "Fixed radio parameters".
+ */
 struct LoRaConfig {
     LoRaPinConfig pins{};
-    float frequencyMHz = 433.0f;   // EU-conform SX1278 variant (see docs/hardware.md)
+    // 433.2, not 433.0: with 125kHz of occupied bandwidth a 433.0 centre spans ~432.94-433.06MHz,
+    // which falls below the 433.050MHz band edge. 433.2 sits clear of both edges.
+    float frequencyMHz = 433.2f;
     float bandwidthKHz = 125.0f;
     uint8_t spreadingFactor = 9;
     uint8_t codingRate = 7;
-    int8_t txPowerDbm = 17;
+    // 7dBm conducted, not 17: the limit is 10mW (10dBm) *e.r.p.*, so a ~2dBi antenna leaves ~9dBm
+    // radiated. 17dBm would be 50mW, five times the legal ceiling.
+    int8_t txPowerDbm = 7;
     uint16_t preambleLength = 8;
     uint16_t nodeId = 0;   // this node's software address; 0xFFFF is reserved as broadcast
-    // PLACEHOLDER: exact ETSI duty-cycle % for the 433MHz sub-band is unverified — see
-    // docs/architecture.md "Open risks" #2. Do not treat as regulatory fact.
-    DutyCycleConfig dutyCycle{1.0f, 3'600'000};
+    // 10% per hour = 360s of airtime, the h1.3 limit above. Previously 1%, which was an
+    // unverified placeholder and roughly ten times stricter than the band actually requires.
+    DutyCycleConfig dutyCycle{10.0f, 3'600'000};
 };
 
 /**

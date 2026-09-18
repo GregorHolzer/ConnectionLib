@@ -24,7 +24,10 @@ struct EspNowConfig {
     uint8_t wifiChannel = 0;      // 0 = use whatever channel WiFi is already on
     bool encrypt = false;
     uint32_t sendTimeoutMs = 2000;   // matches sensor-system's existing ESP-NOW ack-wait timeout
-    DutyCycleConfig dutyCycle{100.0f, 3'600'000};   // 2.4GHz ISM: no ETSI duty-cycle mandate by default
+    // 2.4GHz ISM under ETSI EN 300 328: no duty-cycle limit applies. The standard's 10%
+    // medium-utilisation cap binds only *non-adaptive* equipment, and ESP-NOW inherits 802.11's
+    // CSMA/CA, so it qualifies as adaptive and is exempt. See docs/measurement-methodology.md.
+    DutyCycleConfig dutyCycle{100.0f, 3'600'000};
 };
 
 /**
