@@ -146,6 +146,24 @@ through the ESP32 passthrough). In XCTU: Update Firmware → product family `XB2
 The differing firmware builds are benign — `ZS` (stack profile) and `EE` (encryption) match,
 which is what actually has to agree for joining to work.
 
+**The node board (`5748001588`) has an intermittent USB fault.** Observed repeatedly on
+2026-09-20: it enumerates but its port yields nothing; an upload dies mid-flash; `ioctl(TIOCMSET)`
+returns `OSError: [Errno 71] Protocol error` so the port cannot even be opened; once it wedged the
+host's USB stack badly enough that a `USBDEVFS_RESET` ioctl and then plain `lsusb` both hung. It
+then recovers on its own or after a replug and behaves perfectly for a while.
+
+Two things to know before losing time on it. First, the radio side has never been implicated —
+across these episodes the board completed 100/100 LoRa, 100/100 ESP-NOW and 100/100 Zigbee
+exchanges and replied 107 times during a broadcast run; the fault is confined to the USB/bridge
+layer. Second, **it is intermittent enough to defeat a swap test**: exchanging cables and ports
+appeared to prove the fault followed the board, and minutes later the board worked again on the
+original cable. Treat a single swap result as unreliable and repeat it.
+
+The failure is easy to misread as something else, because a wedged bridge presents as a flashing
+error (`pio run -t upload` failing with no useful cause) or as a dead ESP32 (no boot banner, no
+esptool sync). Check whether the *other* board is healthy on the same tooling before concluding
+anything about firmware or the chip.
+
 ## LoRa — LilyGO T-Beam Meshtastic
 
 An integrated ESP32 dev board with an onboard LoRa module. The variant to use is the **SX1278,
@@ -160,6 +178,94 @@ An integrated ESP32 dev board with an onboard LoRa module. The variant to use is
 
 **Implication**: unlike the Zigbee module, this ships as a single MCU+radio unit — closer in
 shape to how ESP-NOW is already used in sensor-system (native ESP32 radio, no external module).
+
+### Header pinout
+
+| Header | Pin | Label | Notes |
+|--------|-----|-------|-------|
+| Left  | 1–2 | `GPIO36`, `GPIO39` | input-only ADC |
+| Left  | 3  | `RST` | EN |
+| Left  | 4–8 | `GPIO15`, `GPIO25`, `GPIO14`, `GPIO13`, `GPIO2` | 13/25 carry the XBee UART, see above |
+| Left  | 9  | `GND` | |
+| Left  | 10 | `5V` | VBUS rail |
+| Right | 11 | `GPIO1` | UART0 TX |
+| Right | 12 | `GPIO3` | UART0 RX |
+| Right | 13 | `GPIO0` | BOOT |
+| Right | 14 | `GND` | |
+| Right | 15 | `DCDC1` | PMU output |
+| Right | 16 | `GND` | |
+| Right | 17 | `3V3` | XBee VCC on the Zigbee board |
+
+### Serial logging while the board is powered from the PPK2
+
+For power measurement the PPK2 sources into left header pin 10 (`5V`), return on pin 9 (`GND`),
+and the micro-USB cable comes out. That kills the log stream, because logging and flashing both go
+through the onboard CH9102F USB-serial bridge behind that connector. Plugging USB back in is not an
+option: host VBUS would feed the same net the PPK2 is sourcing, and the measurement becomes
+meaningless.
+
+**Solution, verified on the coordinator board 2026-09-20: a micro-USB cable with the VBUS
+conductor cut.** Cut only the red wire; leave D+/D−/GND and the shield intact, and label the cable,
+because it will not charge anything again. The bridge then draws from the PPK2-sourced 5 V rail and
+USB carries data only — confirming that header pin 10 and connector VBUS are a common net on this
+hardware, which the published V1.2 schematic leaves ambiguous
+([LilyGo-LoRa-Series#206](https://github.com/Xinyuan-LilyGO/LilyGo-LoRa-Series/issues/206)).
+
+Everything works over it, with the PPK2 as the sole supply and set to **source mode at 5.0 V**
+(do not drop below ~4 V — the AXP2101 stops treating its VBUS input as a valid source and gates
+every rail the ESP32 needs, which presents as a board that enumerates but never boots):
+
+- **Logging**: full ROM banner plus firmware output (`INFO,pmu,aldo2-enabled-aldo3-disabled`,
+  `BENCH,gateway,ready`) at 115200.
+- **Reset**: RTS → EN, a clean reboot.
+- **Flashing**: `esptool` connects, identifies the ESP32-D0WDQ6-V3, uploads and runs the stub
+  flasher, and hard-resets via RTS. The onboard auto-reset circuit is untouched by the cut, so
+  nothing has to be unplugged between flashing and measuring.
+- **No power injection**: with the cable still in the host, disabling the PPK2 output makes the
+  port disappear within a second and re-enabling brings it back. This is the decisive check — far
+  better than eyeballing the OLED — and it is worth re-running after any recabling.
+
+Steady-state draw of the coordinator at 5.0 V running the ready gateway firmware, bridge
+enumerated: **mean 85.7 mA, median 85.5, p5–p95 78.7–93.1, peak 107.5 mA** (n≈192k).
+
+Two traps cost real time here, both worth re-reading before debugging a silent board:
+
+- **Confirm which board you are talking to.** The two T-Beams enumerate with the same USB VID:PID
+  and only differ by serial (`573C000618` coordinator, `5748001588` node). Addressing one by
+  `ttyACM*` while the other is also plugged in produces a board that is powered and resettable but
+  silent, and a current trace that appears to correlate with resets it never received. Always use
+  the `by-id` path.
+- **Closing a PPK2 API session drops DUT power**, so the port vanishes mid-command. Hold the
+  connection open for the duration of anything that needs the board alive.
+
+**Fallback if the cut cable ever fails — external USB-TTL adapter on UART0.** Adapter jumpered to
+3.3 V logic; verify before connecting anything.
+
+| Adapter wire | Goes to | Notes |
+|---|---|---|
+| GND | Right header pin 14 `GND` | mandatory shared reference |
+| RXD (adapter *receives*) | Right header pin 11 `GPIO1` | direct |
+| TXD (adapter *sends*) | Right header pin 12 `GPIO3` | through a 1 kΩ series resistor |
+| VCC | nothing | cut back and heatshrink |
+
+The 1 kΩ is there because the CH9102F sits on the same 5 V net the PPK2 sources and may well be
+powered with no cable in the jack. If its TXD drives `GPIO3` high while the adapter drives low, the
+resistor caps the contention at ~3.3 mA; it costs nothing otherwise, since 1 kΩ into ~50 pF of line
+capacitance is a ~50 ns edge at 115200 baud. Leave `GPIO0` and `RST` unwired — auto-reset over a
+bare adapter needs the two-transistor circuit and is not worth breadboarding. Flash on this path by
+physically detaching the PPK2 VOUT lead from pin 10 (disabling output in the PPK2 app is not enough,
+a live 5 V net still back-feeds the wire), flashing over the onboard micro-USB, then re-seating it.
+
+**What this costs the measurement.** With the cut cable the bridge is enumerated and awake inside
+the measured envelope. Its exact contribution is **not yet measured** — doing so needs the host end
+physically unplugged while the PPK2 keeps sourcing, then the idle current compared against the
+85.7 mA above. Expect a milliamp-scale constant: tolerable against LoRa TX bursts, fatal to any
+deep-sleep figure. So use the cut cable for development and flashing, but pull it for a measured
+sleep-current run. Independently of the serial path, tapping at `5V` puts the AXP2101
+conversion loss, the GPS and the OLED in the envelope too: fine for whole-node energy, useless for
+per-radio attribution. For the latter, either characterise a baseline and subtract it, or move the
+tap to right header pin 17 (`3V3`) — only safe with the micro-USB fully out, since VBUS would
+otherwise reach that rail through the PMU.
 
 ## ESP-NOW
 

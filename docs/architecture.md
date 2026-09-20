@@ -375,33 +375,41 @@ All three transports now pass the `pingpong` example on real hardware — two Li
 each running gateway and node in turn, 100 request/response exchanges per backend. This is the
 first pass in which every backend has been exercised on hardware rather than only compiled.
 
-| Backend  | Result | Exchanges | Retries | Round trip (ping→pong) |
-|----------|--------|-----------|---------|------------------------|
-| ESP-NOW  | PASS   | 100/100   | 0       | ≤5 ms *(at the harness resolution floor)* |
-| LoRa     | PASS   | 100/100   | 0       | 207–212 ms, median 212 |
-| Zigbee   | PASS   | 100/100   | 2       | not meaningfully measurable — see below |
+Re-run in full on 2026-09-20, after the harness fixes below; every figure in this table is from
+that pass.
+
+| Backend  | Result | Exchanges | Attempts | Retries | Round trip (ping→pong) | Send leg |
+|----------|--------|-----------|----------|---------|------------------------|----------|
+| ESP-NOW  | PASS   | 100/100   | 100      | 0       | 3.38 ms mean (3.25–6.84) | — |
+| Zigbee   | PASS   | 100/100   | 100      | 0       | 124.2 ms mean (122.3–128.2) | 53.1 ms |
+| LoRa     | PASS   | 100/100   | 100      | 0       | 409 ms mean | 202 ms |
 
 **These are a functional check, not a benchmark.** One run per backend, a single ~8-byte
 payload, both boards on the same bench. The exposé's actual measurements are the
 native-vs-library harnesses above plus a future benchmark app; nothing here is a substitute.
 
-Three caveats without which the numbers mislead:
+All three earlier caveats have been resolved, and the history matters because each produced a
+plausible-looking number rather than an error:
 
-- **ESP-NOW's 5 ms is the floor, not a measurement.** `gatewayTick` polls with `delay(5)`
-  (`PingPong.cpp`), so 5 ms is the smallest value the harness can report. Every one of the 100
-  exchanges read exactly 5 ms, which means the true figure is *somewhere below* it.
-- **Zigbee's round trip reads 0 ms, and that is an artifact.** A ZB broadcast status takes ~1 s
-  to resolve, and the node's reply arrives inside that window, so `send()` buffers it in
-  `pendingRx_` and the first `poll()` afterwards returns it immediately. The harness starts its
-  round-trip timer only after `send()` returns, so it measures nothing. The real cost sits
-  inside `send()`: measured directly, gateway broadcast ~950–1020 ms, node unicast reply ~50 ms.
-  Zigbee is not "faster than ESP-NOW"; it is roughly two orders of magnitude slower per
-  exchange, and the metric simply fails to see it.
-- **LoRa's spread is genuinely tiny** (207–212 ms) because at SF9/BW125/CR4:7 the time-on-air
-  dominates and barely varies. That one is a real measurement.
+- **ESP-NOW no longer sits on a resolution floor.** The reply-wait loop used `delay(5)`, so every
+  exchange read exactly 5 ms. With a 200 µs poll it measures 3.38 ms and varies with payload size.
+- **Zigbee now measures the link, not the send block.** The old 0 ms was an artifact of
+  broadcasting: a ZB broadcast status takes ~1 s to resolve and the reply lands inside that
+  window, so `send()` buffers it in `pendingRx_`. `run_pingpong.py` never injected
+  `PINGPONG_PEER_XBEE64_HI/LO`, so the gateway always took the broadcast fallback in
+  `peerAddress()`. Supplying the peer makes it unicast: 53.1 ms send leg, 124.2 ms round trip,
+  and 100 exchanges in ~20 s instead of ~1000 s. Measured back to back on the same pair,
+  broadcast managed 42/100 in 400 s from 243 attempts; unicast did 100/100 from 100.
+- **LoRa's 207–212 ms excluded the outbound leg.** The timer started after `send()` returned. The
+  true round trip is ~409 ms, of which 202 ms is the send.
 
-Retries are the more comparable reliability signal here: ESP-NOW and LoRa completed with none,
-Zigbee needed 1–2 across runs.
+**The harness's own PASS/FAIL cannot be trusted in either direction.** `run_pingpong.py` grades on
+`successes > 0`, so it prints PASS on a truncated run, and its node-reply check looks for a log
+line containing `"replied"` which the firmware no longer emits — so all three runs above exited
+non-zero while completing 100/100. Grade on the gateway's `=== done: N/100 … ===` line instead.
+
+Retries are no longer a discriminator: all three completed with zero, Zigbee included, once it
+was unicasting.
 
 ## Build order
 
