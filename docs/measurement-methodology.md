@@ -11,8 +11,9 @@ of the thesis. This document is therefore structured as *justification*, not as 
 every metric is tied to the source that motivates it, and every place where the three
 technologies cannot be made comparable is named explicitly rather than averaged over.
 
-Status: derived from the sources marked **[read]** below. Claims resting on sources not yet
-retrieved are marked **[pending]** and must not be cited until checked.
+Status: every source in §8 has been read in full, and no claim below rests on an unretrieved one.
+The convention stands for future additions — claims resting on sources not yet retrieved are marked
+**[pending]** and must not be cited until checked.
 
 ## 1. Framework
 
@@ -60,6 +61,7 @@ part of why the comparison is worth running at all.
 | Inter-packet interval | from the FORTE profile | `boano2018`: traffic parameters must always be input |
 | Packets per test point | from §5 | — |
 | TX power | normalised by EIRP where the band permits | `ojo2021` set 9.9/10.4 dBm across 433/868 MHz *specifically* to equalise system gain |
+| Supply voltage | 3.9 V, regulated by the PPK2 source meter | Energy is measured in situ (§9), so the node runs from the meter rather than its cell at every position. A fixed supply is what makes energy figures comparable between positions as well as between technologies |
 | Antenna height | fixed, < 2 m | `becker2025` used 0.95 m; `ojo2021` 1.7 m; forest sensors typically below 2 m |
 | Distance / position | shared grid, all three measured at the same points | §6 |
 | Topology | 1 sender, 1 receiver, single hop | matches the profile |
@@ -128,28 +130,101 @@ carries a 6-byte software header (`destNodeId`/`srcNodeId`/`seq`/`payloadLen`) p
 because raw SX1278 has no addressing at all, whereas Zigbee and ESP-NOW address natively.
 At an 8-byte payload that is 43 % overhead for LoRa and none for the others.
 
-RSSI and SNR are deliberately **demoted to observed metrics** (§5), not comparison axes.
-They are unavailable on ESP-NOW, and `baccour2012` **[pending]** is the standard reference
-for why they are weak predictors of delivery even where available.
+RSSI and SNR are deliberately **demoted to observed metrics** (§5), not comparison axes. The first
+reason is availability — neither is exposed on ESP-NOW. The second is that `baccour2012`, surveying
+a decade of link-quality estimation, shows they are unfit for the job even where the radio does
+expose them:
+
+- **They are measured only on packets that arrived.** This is the decisive objection. Hardware
+  estimators are read out of the transceiver on reception, so a link losing most of its packets
+  reports the signal quality of its survivors and *overestimates* itself. The bias grows exactly
+  where the link gets bad — which, per §7, is the region this comparison is aimed at.
+- **They resolve good links, not intermediate ones.** Above a threshold (~−87 dBm in
+  `baccour2012`'s cited study) PRR is consistently ~99 %, so a single reading answers "is this link
+  excellent?" well. Below it, a shift as small as **2 dBm flips a good link to a bad one**, and the
+  survey reports that neither RSSI nor LQI can differentiate links there at all.
+- **The threshold is a property of the environment, not the radio.** It is reported at −90 dBm on a
+  grass field, −91 dBm on a parking lot and −89 dBm in a corridor. A forest would need its own
+  calibration before any RSSI figure could be read as a quality claim.
+- **The SNR→PRR mapping depends on hardware and on temperature.** The theoretical route from SNR
+  through bit error rate to PRR exists, but the survey concludes SNR "cannot be used as a
+  standalone estimator". Temperature entering here is the same mechanism §5 records via `boano2014`.
+
+The survey's own framing is that this literature provides "radically different (and sometimes
+contradictory) results" — whether RSSI or LQI is the better estimator is, in its words, an
+unanswered question. A quantity whose interpretation is contested, environment-calibrated and
+biased on failing links is evidence about conditions, not an axis on which to rank three radios.
+
+`liu2022` arrives at the same demotion from the application side — most prior comparisons report
+RSSI, SNR and PDR, and it drops the first two because end users experience latency and delivered
+data, not signal strength.
 
 ## 5. Observed metrics
 
 Recorded per run to establish that runs were comparable; not compared between technologies.
 
-- **RSSI / SNR** where the radio exposes them
+- **RSSI / SNR** where the radio exposes them — recorded as conditions, with the caveat from §4
+  that they describe only the packets that arrived
 - **External interference** — 2.4 GHz shares spectrum with Wi-Fi; 433 MHz does not. This
   asymmetry is a threat to fairness (§6.5) and must be measured, not assumed away
 - **Vegetation state** — species, density, foliage/season, wetness. Attenuation is
   frequency-dependent (`itu833`), so this interacts with the band asymmetry
-- **Temperature** — known to affect low-power transceivers **[pending: verify source]**
+- **Temperature** — on-board, not just ambient. `boano2014` (TempLab) reports that normal outdoor
+  variation moves on-board temperature by up to 35 °C in an hour, which is enough to shift the
+  crystal by >100 ppm and to cut received signal strength by more than 6 dB — sufficient, in the
+  traces they reproduce, to take a link from 100 % to 0 % packet reception over a single day. It
+  also introduces a *dynamic heterogeneity*: two nodes with identical parameters but different
+  on-board temperatures perform differently, and nodes physically close together can have very
+  different temperature profiles. Under a forest canopy that is a per-position property — sun
+  flecks do not fall evenly — so it is recorded per run at both ends of the link
 - **Time of day / date** of each run
 
 ## 6. Fairness threats and mitigations
 
 This is the substance of RQ1. Prior work compares within a band (`ojo2021`) or pairwise
-(`liu2022` **[pending]**); comparing all three at once raises problems none of them face.
+(`liu2022`); comparing all three at once raises problems none of them face.
+
+`liu2022` is the closest published comparison to this one and is worth stating precisely, because
+its design decisions diverge from this document's at three points. It compares ZigBee against LoRa
+in a 12-storey concrete building in Dalian across three scenarios — line-of-sight, horizontal
+(same floor) and vertical (floors 4–12, at both a central and a window position) — sweeping baud
+rate and packet length, and reports exactly two metrics: **RTT and PLR**. It concludes LoRa wins on
+penetration, PLR and usually RTT, with ZigBee cheaper per module and lower-power.
+
+- **Energy is excluded by assumption, not measured.** The paper states plainly that buildings have
+  mains power, so battery life is not its concern; its only energy claim is that a single LoRa
+  module "may be three times" a ZigBee one, in a qualitative discussion. For FORTE's months-on-
+  battery satellites that is the binding requirement, which is why §4 makes energy per *delivered*
+  payload a primary axis rather than a closing remark.
+- **Transmit power is not equalised.** LoRa is configured at **30 dBm** — 1 W, a hundred times the
+  10 mW e.r.p. that §3.1 is held to, and not a power any EU deployment may use. Whatever margin
+  that buys is folded into "LoRa outperforms ZigBee". This is §6.4's threat appearing in published
+  work, and the reason EIRP normalisation is an input parameter here.
+- **There are no repetitions in the statistical sense.** RTT is the mean of 10 manually sent
+  packets and PLR the ratio over 500, one measurement per condition, with no confidence intervals.
+  §7's KPIs exist to make claims that survive the variability such a design cannot see.
+
+None of this makes the paper wrong on its own terms — a mains-powered building study reasonably
+ignores energy. It makes it non-substitutable for this comparison, and it is the concrete case for
+why RQ1 needed deriving rather than borrowing.
 Items 1, 2 and 6 were confirmed empirically during hardware bring-up (see
 [`hardware.md`](hardware.md), [`architecture.md`](architecture.md)).
+
+**Why these are handled by procedure rather than by a facility.** The established answer to
+comparability in this field is a benchmarking testbed. `schuss2018`'s D-Cube is the reference
+example: target nodes individually switched over PoE, observer modules tracing GPIO and current per
+node, interference *generated* to a specified level by dedicated Wi-Fi nodes, NTP synchronisation
+well below 10 µs, and experiments scheduled at night or on public holidays specifically to keep
+uncontrolled interference out of the measurement. The motivation given is the one this document
+starts from — without a standard methodology, divergence across experimental setups makes results
+from different authors impossible to compare.
+
+None of that is available in a forest. Interference cannot be generated to a set level, runs cannot
+be deferred to a quiet night in a spectrum nobody controls, and the deployment environment is the
+object of study rather than a nuisance to be suppressed. Every control a facility would supply must
+therefore be replaced by a *recorded* observation (§5) plus a rule for discarding non-comparable
+runs. It is worth noting that even D-Cube treats recording environmental effects and controlling
+temperature as future work, so this gap is not an artefact of working outdoors on a budget.
 
 **6.1 Maximum payload differs by 3×.** ESP-NOW 250 B, LoRa 249 B (255 − 6 B header),
 Zigbee 84 B. *Mitigation:* sweep only within the common range (≤ 84 B). Report the
@@ -172,9 +247,16 @@ frequency-dependent (`itu833`). *Mitigation:* none available — normalise EIRP 
 then report the band as a property of the technology. Do not claim the comparison isolates
 the protocol from its band; it cannot.
 
-**6.5 Interference environments differ.** 2.4 GHz is crowded, 433 MHz much less so.
-*Mitigation:* measure interference as an observed metric per run; discard or flag runs whose
-observed conditions are not comparable (`boano2018`).
+**6.5 Interference environments differ, and the environment includes the experimenter.** 2.4 GHz is
+crowded, 433 MHz much less so. *Mitigation:* measure interference as an observed metric per run;
+discard or flag runs whose observed conditions are not comparable (`boano2018`).
+
+`liu2022` reports the sharpest available warning here: in their vertical-central experiment, LoRa's
+PLR on the top floor went from **100 % with nobody nearby to under 10 % when a researcher stood
+near the transmitter**. An uncontrolled and unrecorded factor — where the person running the
+experiment was standing — inverted the result completely. A field protocol must therefore fix and
+record the operator's position along with the radio's, and §7's clock-sync sequence is the natural
+place to pin it down.
 
 **6.6 Where latency is timestamped changes the answer.** Measured on the bench: a Zigbee
 broadcast blocks ~950–1020 ms inside `send()` waiting for its APS status, while a unicast
@@ -186,8 +268,8 @@ for exactly this reason.
 
 ## 7. Experiment design
 
-`jacob2021` (TriScale) supplies the statistics; `jacob2019` **[pending]** the reporting
-requirements. TriScale partitions an evaluation into three timescales:
+`jacob2021` (TriScale) supplies the statistics; `jacob2019`, by the same first author, supplies the
+reporting requirements. TriScale partitions an evaluation into three timescales:
 
 - **run** — one execution of the experiment
 - **series** — a set of runs, sampling the distribution of conditions
@@ -197,6 +279,22 @@ A **KPI** is a given percentile of a performance metric, estimated with a stated
 level as a one-sided non-parametric confidence interval. A **variability score** is a pair
 of one-sided CIs across sequels, estimating how similar results would be if the whole
 evaluation were repeated.
+
+**What must be reported.** `jacob2019` decomposes an evaluation into *experiments* → *analysis* →
+*synthesis* and insists the methodology answer five questions in advance: which metrics to compute,
+which raw data to collect, how many samples, how to synthesise them, and how many experiments to
+run. Three of its prescriptions bind this document:
+
+- **Do not synthesise with the mean and standard deviation.** Low-power wireless measurements are
+  routinely non-normal, so mean-and-variance summaries are inappropriate however common they are.
+  Report percentiles with non-parametric CIs — which is what the KPIs above already are.
+- **Report the conservative bound of the CI, not its centre.** The direction depends on the metric:
+  for PDR, where higher is better, report the **lower** bound; for energy, where lower is better,
+  report the **upper** bound. A run that quotes the point estimate is claiming more than it measured.
+- **Collect raw data as fine-grained as the harness allows.** Their example is exactly this
+  project's: store send and receive timestamps rather than their difference, because the difference
+  yields only latency while the pair also yields jitter. The `sendUs`/`rttUs` split forced by §6.6
+  satisfies this, and it is the reason the Zigbee timestamping fault was recoverable at all.
 
 **How many repetitions.** This follows from the desired percentile and confidence, not from
 a round number. TriScale Eq. (4):
@@ -216,7 +314,52 @@ N ≥ log(1 − C) / log(1 − p)
 The 11 reproduces the paper's own worked example (25th percentile at 95 % confidence). The
 practical consequence is that **tail claims are expensive**: asserting a 5th-percentile PDR
 with 95 % confidence needs 59 runs per point, which for a field campaign at many positions
-sets the budget. Choose the percentile deliberately.
+sets the budget.
+
+**Decision: the 25th percentile at 95 % confidence, so N = 11 runs per test point.** The median was
+rejected deliberately. `becker2025`'s central finding is that links fail non-monotonically — dead at
+59, 61 and 64 m while working at 62 and 65 m — so the interesting behaviour of these technologies in
+a forest is in the bad links, and a median says nothing about them. The 25th percentile reaches into
+that lower tail while staying affordable, and it is the percentile TriScale itself works through.
+Going further down costs disproportionately: the 10th needs 29 runs and the 5th needs 59, which at
+any realistic number of positions is a campaign that does not finish.
+
+This is also why §4 keeps PDR rather than RSSI as the primary reliability axis. `baccour2012`'s
+hardware estimators are blindest precisely in the region a 25th-percentile claim is about, so the
+two decisions have to agree: a tail claim needs a metric that counts failures.
+
+> `jacob2019` gives 6 samples for a 95 % CI on the median where §7's table gives 5. The difference
+> is one-sided versus two-sided intervals; this document follows TriScale's one-sided convention
+> throughout, since every claim here is directional ("PDR is at least…", "energy is at most…").
+
+**N = 11 collides with LoRa's duty cycle, and the collision decides the run length.** From §3.1, one
+100-exchange sweep over 8/16/32/84 B costs ~148 s of airtime against a legal budget of 360 s per
+hour. Eleven of those is ~1630 s of airtime, so:
+
+```
+11 runs × 148 s airtime ÷ 360 s per hour ≈ 4.5 hours of wall clock per position — LoRa alone
+```
+
+A dozen positions would be ~54 h of LoRa field time before setup, clock sync or the other two
+technologies. That is not a campaign anyone completes, and it is a constraint on the *run*, not on
+the percentile: N = 11 is fixed by the claim being made, whereas the 100 exchanges per payload size
+are an input parameter (§3) inherited from the bench ping-pong. Shortening the run is the lever, and
+`jacob2019` independently recommends exactly that shape — *"many short tests rather than a few long
+tests"* — because repetitions buy confidence and length does not.
+
+The benchmark suite has already taken this step for its own campaign: `bench/technologies/lora.py`
+sets `EXCHANGES = 20`, commented *"deliberately lower than the 2.4 GHz benchmarks; airtime is the
+constraint"*. Carrying that number into the field gives ~29.6 s of airtime per run and
+
+```
+11 runs × 29.6 s airtime ÷ 360 s per hour ≈ 0.9 hours per position — LoRa alone
+```
+
+which is a campaign that fits in a working day per handful of positions. **20 is therefore the
+presumptive value, but the choice is recorded as open** (§9): the bench figure was set for an
+OFAT sweep over 16 radio configurations, whereas the field campaign holds §3.1's parameters fixed
+and varies position instead, so the number is a precedent rather than a derivation. §5's observed
+metrics are what will show whether a 20-exchange run still spans comparable conditions.
 
 The exposé already commits to a repeatability check at a fixed reference position before
 going into the field; in TriScale's terms that is a sequel, and it yields the variability
@@ -239,26 +382,56 @@ EIRP normalisation across bands) · `becker2025` (ESP-NOW outdoor: PDR/one-way d
 RBS sync, 205 positions, non-monotonic PDR) · `pfister2025`, `pfister2024` (FORTE profile) ·
 `boano2018` IoTBench (input/output/observed taxonomy, profiles) · `jacob2021` TriScale
 (run/series/sequel, KPIs, Eq. 4) · `sundaram2024` MARS (Zigbee + LoRa radio selection;
-throughput/latency only — partial read) · `corke2010` (application framing only).
+throughput/latency only — partial read) · `corke2010` (application framing only) ·
+`jacob2019` (experiments/analysis/synthesis, the ban on mean-and-variance synthesis,
+conservative CI bounds, raw-data granularity, short-tests-over-long-tests) · `schuss2018` D-Cube
+(what a benchmarking *facility* controls, and why a field study cannot) · `boano2014` TempLab
+(temperature's effect on link quality, clock drift and battery, and its heterogeneity across
+nearby nodes) · `liu2022` (ZigBee vs LoRa in a concrete building; RTT/PLR only, LoRa at an
+unequalised 30 dBm, and the operator-proximity effect in §6.5) · `baccour2012` (link-quality
+estimation survey; why RSSI/SNR cannot serve as comparison axes — §4).
 
-**Pending retrieval — not yet cited as evidence.**
+**Pending retrieval.** None — as of 2026-09-21 every source cited here has been read in full.
 
-1. `baccour2012` — Baccour et al., *Radio Link Quality Estimation in Wireless Sensor
-   Networks: A Survey*, ACM TOSN 8(4):1–33. Needed to justify demoting RSSI/SNR to observed.
-2. `liu2022` — Liu et al., *Comparative Evaluation of the Performance of ZigBee and LoRa
-   Wireless Networks in Building Environment*, Electronics 11(21):3560. Already in the `.bib`.
-3. `schuss2018` — Schuß, Boano, Römer et al., *Moving Beyond Competitions: Extending D-Cube
-   to Seamlessly Benchmark Low-Power Wireless Systems*, CPSBench 2018.
-4. `jacob2019` — Jacob, Boano, Raza, Zimmerling, Thiele, *Towards a Methodology for
-   Experimental Evaluation in Low-Power Wireless Networking*, CPS-IoTBench 2019.
+`jacob2019`, `schuss2018`, `boano2014` and `baccour2012` are **not yet in**
+`~/Nextcloud/Uni/bachelor/thesis/literature.bib` and need entries before the thesis section cites
+them. PDFs are in `~/Nextcloud/Uni/bachelor/related-work/`; author copies of the first three are
+free at `carloalbertoboano.com/documents/`.
 
 ## 9. Open questions
 
-- Which percentile to claim, given §7's cost table and the number of field positions.
-- Whether energy is measured per-node in situ or on the bench under replayed conditions.
-**Resolved.** ~~Whether the LoRa duty-cycle ceiling is treated as a result (§6.3) or normalised
-away.~~ Settled as a **result**: the EU parameter set in §3.1 is held fixed and never relaxed for
-benchmarking, and the runner reports measured airtime against the legal budget. ~~The exact ETSI
-figure for the 433 MHz sub-band is an unverified placeholder.~~ Verified against EN 300 220-2 and
-ERC-REC 70-03 h1.3 — 10 %, not the 1 % placeholder; see §3.1, which also corrected an
-out-of-band centre frequency and a TX power five times the legal ceiling.
+**Open.**
+
+- **How many exchanges per test point.** Raised by the percentile decision below: the ping-pong
+  harness's 100 exchanges per payload size make a single LoRa run cost ~148 s of airtime, and
+  eleven of those exceed four hours per position under the 10 % duty cycle. The benchmark suite
+  already runs LoRa at 20 (`bench/technologies/lora.py`), which would give ~0.9 h per position, so
+  20 is the presumptive answer — but it was chosen for a different sweep and should be confirmed
+  rather than inherited. Must be fixed before the field campaign is scheduled. See §7.
+
+**Resolved.**
+
+- ~~Which percentile to claim, given §7's cost table and the number of field positions.~~ The
+  **25th percentile at 95 % confidence, N = 11 runs per point.** The median was rejected because
+  `becker2025`'s non-monotonic failures put the interesting behaviour in the lower tail, which a
+  median cannot see; the 10th and 5th percentiles reach further into that tail but cost 29 and 59
+  runs per point. See §7 for the derivation and for the duty-cycle consequence.
+- ~~Whether energy is measured per-node in situ or on the bench under replayed conditions.~~
+  **In situ, at each field position.** Composing energy analytically from bench per-attempt cost and
+  field PDR would assume the retransmission behaviour it is trying to measure; measuring in place
+  captures it directly and makes energy-per-delivered-payload a per-position output metric rather
+  than a bench constant. Three consequences are accepted openly:
+  - Every position must be reachable with a host laptop and the PPK2, which constrains the position
+    grid in §7 — a position that cannot be instrumented cannot contribute an energy figure.
+  - The instrumented node runs with its cell removed and its USB VBUS cut, sourced at a fixed 3.9 V
+    (§3). This perturbs the device, but identically for all three technologies, so it does not bias
+    the comparison it is used for.
+  - A fixed supply also means cell behaviour is **excluded by construction**. `boano2014` lists
+    early battery depletion among temperature's effects; that mechanism is outside what this
+    measurement can see, and a lifetime claim derived from these figures must say so.
+- ~~Whether the LoRa duty-cycle ceiling is treated as a result (§6.3) or normalised away.~~ Settled
+  as a **result**: the EU parameter set in §3.1 is held fixed and never relaxed for benchmarking,
+  and the runner reports measured airtime against the legal budget.
+- ~~The exact ETSI figure for the 433 MHz sub-band is an unverified placeholder.~~ Verified against
+  EN 300 220-2 and ERC-REC 70-03 h1.3 — 10 %, not the 1 % placeholder; see §3.1, which also
+  corrected an out-of-band centre frequency and a TX power five times the legal ceiling.
