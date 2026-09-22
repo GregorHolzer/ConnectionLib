@@ -32,8 +32,10 @@ include/ConnectionLib/             # public headers, namespace `connectionlib`
   backends/zigbee/ZigbeeTransport.hpp   # + ZigbeeConfig, ZigbeePinConfig (T-Beam wiring)
 
 src/ConnectionLib/
+  Address.cpp
   DutyCycleGuard.cpp
-  backends/espnow/EspNowTransport.cpp
+  backends/espnow/EspNowTransport.cpp    # lifecycle, setup(), fixed accessors
+  backends/espnow/EspNowExchange.cpp     # send()/poll() + the static C callbacks
   backends/lora/LoRaTransport.cpp
   backends/zigbee/ZigbeeTransport.cpp
 
