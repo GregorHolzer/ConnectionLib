@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <vector>
@@ -15,6 +16,7 @@
 #if defined(ESP32) && defined(CONNECTIONLIB_ENABLE_ESPNOW)
 
 #include <esp_now.h>
+#include <esp_wifi_types.h>
 
 namespace connectionlib {
 
@@ -24,6 +26,13 @@ struct EspNowConfig {
     uint8_t wifiChannel = 0;      // 0 = use whatever channel WiFi is already on
     bool encrypt = false;
     uint32_t sendTimeoutMs = 2000;   // matches sensor-system's existing ESP-NOW ack-wait timeout
+    // Opt-in per-packet RSSI. esp_now.h exposes none on this core (the legacy three-argument recv
+    // callback carries no rx_ctrl; esp_now_recv_info_t arrived in IDF 5.x), so the only route is a
+    // promiscuous-mode sniffer running alongside. That hands every frame on the channel to the
+    // CPU, which costs current and adds jitter - measurable on exactly the energy figures a
+    // benchmark exists to take. Hence default false: a consumer that wants signal quality asks
+    // for it and accepts the perturbation.
+    bool captureRssi = false;
     // 2.4GHz ISM under ETSI EN 300 328: no duty-cycle limit applies. The standard's 10%
     // medium-utilisation cap binds only *non-adaptive* equipment, and ESP-NOW inherits 802.11's
     // CSMA/CA, so it qualifies as adaptive and is exempt. See docs/measurement-methodology.md.
@@ -66,8 +75,11 @@ class EspNowTransport : public Transport {
         std::array<uint8_t, kMaxPayload> data{};
         uint8_t len = 0;
         uint32_t timestampMicros = 0;
+        bool hasRssi = false;
+        int8_t rssiDbm = 0;
     };
 
+    static void onSniffTrampoline(void *buf, wifi_promiscuous_pkt_type_t type);
     static void onDataRecvTrampoline(const uint8_t *mac, const uint8_t *data, int len);
     static void onDataSentTrampoline(const uint8_t *mac, esp_now_send_status_t status);
     void handleRecv(const uint8_t *mac, const uint8_t *data, size_t len);
@@ -84,6 +96,13 @@ class EspNowTransport : public Transport {
     std::atomic<uint8_t> queueTail_{0};
 
     // Set by the send callback; polled by send() while it blocks (bounded by sendTimeoutMs).
+    // Written by the sniffer callback, read by the recv callback. Both run in WiFi task context
+    // and the sniffer fires first for the same frame, so a plain pair of volatiles is enough - no
+    // ordering guarantee is needed beyond "most recent frame from this MAC".
+    volatile bool sniffValid_ = false;
+    volatile int8_t sniffRssiDbm_ = 0;
+    std::array<uint8_t, 6> sniffMac_{};
+
     volatile bool sendDone_ = false;
     volatile esp_now_send_status_t sendStatus_ = ESP_NOW_SEND_FAIL;
 

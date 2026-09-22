@@ -31,6 +31,12 @@ struct ZigbeeConfig {
     // Same reasoning as EspNowConfig: ETSI EN 300 328 imposes no duty-cycle limit, and its 10%
     // medium-utilisation cap applies only to non-adaptive equipment - 802.15.4 uses CSMA/CA.
     DutyCycleConfig dutyCycle{100.0f, 3'600'000};
+    // Opt-in per-packet RSSI via the `DB` AT command. The ZB RX frame carries no signal quality,
+    // so the only route is to ask the module after the fact - a UART round trip at 9600 baud,
+    // inside the window poll() is measured over. It therefore inflates any latency measured
+    // around a receive, which is why it defaults off: a timing campaign and a signal-quality
+    // campaign are different runs.
+    bool captureRssi = false;
 };
 
 /**
@@ -95,9 +101,15 @@ class ZigbeeTransport : public Transport {
     // it takes ~1ms. At the previous 500ms budget that made packet #1 of every run report
     // Timeout on a perfectly good link.
     static constexpr uint32_t kTxStatusWaitMs = 1500;
+    // Deliberately short. A `DB` query is a few bytes each way at 9600 baud plus module turnaround,
+    // so anything beyond this means the module is busy - and stalling a receive to chase an
+    // observed metric costs more than the metric is worth.
+    static constexpr uint32_t kRssiQueryWaitMs = 50;
 
     /** @brief Parse the frame currently held by xbee_ as a ReceivedMessage. */
     ReceivedMessage buildReceived();
+    /** @brief `DB` AT query: RSSI of the last received packet, or nullopt if the module dodges. */
+    std::optional<float> queryLastRssi();
 
     ZigbeeConfig config_;
     DutyCycleGuard dutyCycle_;

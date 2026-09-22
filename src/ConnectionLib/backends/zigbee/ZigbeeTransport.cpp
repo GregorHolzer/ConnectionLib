@@ -102,9 +102,42 @@ ReceivedMessage ZigbeeTransport::buildReceived() {
     msg.payload.assign(rx.getData(), rx.getData() + rx.getDataLength());
     msg.timestampMicros = micros();
     msg.totalBytes = rx.getDataLength();
-    // rssiDbm/snrDb left nullopt: the ZB RX frame doesn't carry signal quality - a separate `DB`
-    // AT query would be needed after the fact, not implemented in this pass.
+    // snrDb stays nullopt: the module reports no SNR through any AT command. rssiDbm costs a
+    // UART round trip, so it happens only when asked for.
+    if (config_.captureRssi) {
+        msg.rssiDbm = queryLastRssi();
+    }
     return msg;
+}
+
+std::optional<float> ZigbeeTransport::queryLastRssi() {
+    // `DB` returns a single byte: the *magnitude* of the last received packet's RSSI in dBm, so
+    // the sign has to be put back. It reflects whichever packet arrived most recently, which is
+    // why this is issued here, immediately after building that packet, rather than batched.
+    uint8_t command[] = {'D', 'B'};
+    AtCommandRequest request(command);
+    xbee_.send(request);
+
+    uint32_t waitStart = millis();
+    while (millis() - waitStart < kRssiQueryWaitMs) {
+        int remaining = static_cast<int>(kRssiQueryWaitMs - (millis() - waitStart));
+        if (remaining <= 0 || !xbee_.readPacket(remaining)) {
+            break;
+        }
+        if (xbee_.getResponse().getApiId() != AT_COMMAND_RESPONSE) {
+            // Anything else arriving mid-query is abandoned rather than stashed: recursing into
+            // buildReceived() from inside a receive is not worth the reentrancy, and a dropped
+            // frame here shows up honestly as a delivery failure rather than as a silent repair.
+            continue;
+        }
+        AtCommandResponse response;
+        xbee_.getResponse().getAtCommandResponse(response);
+        if (response.isOk() && response.getValueLength() >= 1) {
+            return -static_cast<float>(response.getValue()[0]);
+        }
+        break;
+    }
+    return std::nullopt;
 }
 
 std::optional<ReceivedMessage> ZigbeeTransport::poll() {
