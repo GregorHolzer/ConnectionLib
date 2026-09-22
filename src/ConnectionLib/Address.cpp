@@ -1,3 +1,10 @@
+/**
+ * @brief Address construction and the checked accessors that read it back.
+ *
+ * Each asXxx() returns nullopt rather than throwing when the address is not of that kind, which is
+ * what lets every backend open its send() by rejecting an address meant for a different radio.
+ */
+
 #include "ConnectionLib/Address.hpp"
 
 #include <algorithm>

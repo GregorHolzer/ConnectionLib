@@ -1,3 +1,10 @@
+/**
+ * @brief Rolling-window airtime ledger backing the admission checks in DutyCycleGuard.hpp.
+ *
+ * Entries older than the window are pruned lazily, on read, so the guard needs no timer of its own
+ * and stays host-testable against a synthetic clock.
+ */
+
 #include "ConnectionLib/DutyCycleGuard.hpp"
 
 #include <algorithm>

@@ -1,3 +1,12 @@
+/**
+ * @brief Zigbee backend over xbee-arduino, talking API mode to an XBee S2C on a UART.
+ *
+ * The module owns the mesh, so this class only builds ZBTxRequest frames and parses ZBRxResponse
+ * ones. Two consequences shape the code: send() must wait for a TX-status frame to know whether
+ * delivery succeeded, and a reply can arrive inside that wait - hence pendingRx_, which holds such
+ * a frame for the next poll() instead of dropping it.
+ */
+
 #include "ConnectionLib/backends/zigbee/ZigbeeTransport.hpp"
 
 #if defined(ESP32) && defined(CONNECTIONLIB_ENABLE_ZIGBEE)

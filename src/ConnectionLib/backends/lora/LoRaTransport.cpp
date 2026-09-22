@@ -1,3 +1,13 @@
+/**
+ * @brief LoRa backend over RadioLib's SX1278 driver.
+ *
+ * The one backend that has to invent its own addressing: a raw SX1278 has none, so every frame
+ * carries a FrameHeader (dest/src node id, sequence, payload length) that send() prepends and
+ * poll() strips, discarding anything not addressed to this node. It is also the one backend whose
+ * duty-cycle accounting is real rather than nominal - the estimate comes from the radio's own
+ * getTimeOnAir(), because at SF12 a single 32-byte message costs 2.5s of the hourly budget.
+ */
+
 #include "ConnectionLib/backends/lora/LoRaTransport.hpp"
 
 #if defined(ESP32) && defined(CONNECTIONLIB_ENABLE_LORA)
