@@ -306,8 +306,10 @@ matching sensor-system exactly).
 
 - **Backend-internal**: peer registration (`esp_now_add_peer()` per `Address` in
   `EspNowConfig.peers`) in `setup()`; `WiFi.mode(WIFI_STA)` + `esp_now_init()` sequencing; the
-  static-flag-from-recv-callback pattern for detecting completion, with a configurable timeout
-  (default 2000ms, matching sensor-system's existing value). No chunking, no RTC-memory
+  send callback sets a status flag and gives a binary semaphore that `send()` blocks on, with a
+  configurable timeout (default 2000ms, matching sensor-system's existing value). `send()`
+  therefore returns as soon as the result is in; an earlier `delay(1)` polling loop made it
+  return only on 1 ms tick boundaries, which is a large share of a ~3 ms exchange. No chunking, no RTC-memory
   cache-on-timeout fallback — `send()` just returns `SendStatus::Timeout` and lets the caller decide.
 - **Surfaced**: `send()`/`listen()`/`SendResult` per the generic interface.
   `SendResult.acknowledged = (status == ESP_NOW_SEND_SUCCESS)` from `esp_now_send_cb` — reuses the

@@ -21,9 +21,19 @@ EspNowTransport::~EspNowTransport() {
         esp_now_deinit();
         activeInstance_ = nullptr;
     }
+    if (sendSignal_ != nullptr) {
+        vSemaphoreDelete(sendSignal_);
+    }
 }
 
 bool EspNowTransport::setup() {
+    if (sendSignal_ == nullptr) {
+        sendSignal_ = xSemaphoreCreateBinary();
+        if (sendSignal_ == nullptr) {
+            lastError_ = ESP_ERR_NO_MEM;
+            return false;
+        }
+    }
     activeInstance_ = this;
 
     WiFi.mode(WIFI_STA);
@@ -97,6 +107,7 @@ SendResult EspNowTransport::send(const Address &destination, const uint8_t *payl
 
     sendDone_ = false;
     sendStatus_ = ESP_NOW_SEND_FAIL;
+    xSemaphoreTake(sendSignal_, 0);   // drop the signal of a callback that came after a timeout
 
     uint32_t t0 = micros();
     esp_err_t err = esp_now_send(mac->data(), payload, len);
@@ -106,10 +117,7 @@ SendResult EspNowTransport::send(const Address &destination, const uint8_t *payl
         return result;
     }
 
-    uint32_t deadline = millis() + config_.sendTimeoutMs;
-    while (!sendDone_ && millis() < deadline) {
-        delay(1);
-    }
+    xSemaphoreTake(sendSignal_, pdMS_TO_TICKS(config_.sendTimeoutMs));
     uint32_t t1 = micros();
 
     result.timestampMicros = t1;
@@ -196,6 +204,8 @@ void EspNowTransport::onDataSentTrampoline(const uint8_t *mac, esp_now_send_stat
     }
     activeInstance_->sendStatus_ = status;
     activeInstance_->sendDone_ = true;
+    // Runs in the WiFi task, not in an interrupt, so the plain give is the right one.
+    xSemaphoreGive(activeInstance_->sendSignal_);
 }
 
 void EspNowTransport::handleRecv(const uint8_t *mac, const uint8_t *data, size_t len) {

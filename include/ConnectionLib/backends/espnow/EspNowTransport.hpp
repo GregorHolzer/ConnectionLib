@@ -15,6 +15,8 @@
 #if defined(ESP32) && defined(CONNECTIONLIB_ENABLE_ESPNOW)
 
 #include <esp_now.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 namespace connectionlib {
 
@@ -86,7 +88,10 @@ class EspNowTransport : public Transport {
     std::atomic<uint8_t> queueHead_{0};
     std::atomic<uint8_t> queueTail_{0};
 
-    // Set by the send callback; polled by send() while it blocks (bounded by sendTimeoutMs).
+    // Set by the send callback, which then gives sendSignal_. send() blocks on that semaphore
+    // (bounded by sendTimeoutMs), so it returns when the result is in rather than on the next
+    // RTOS tick: a 1 ms polling loop here used to add up to a millisecond to every send.
+    SemaphoreHandle_t sendSignal_ = nullptr;
     volatile bool sendDone_ = false;
     volatile esp_now_send_status_t sendStatus_ = ESP_NOW_SEND_FAIL;
 
