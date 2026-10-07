@@ -8,9 +8,10 @@ per-link technology selection) machinery. All three backends are implemented: ES
 [`hardware.md`](hardware.md).
 
 Two design decisions worth calling out up front:
-- **LoRa ack semantics: fire-and-forget.** `LoRaTransport::send()`'s `acknowledged` is always
-  `false` — no app-layer ARQ. PDR/reliability is a future benchmark app's job (via its own sequence
-  numbers), not the library's.
+- **LoRa ack semantics: fire-and-forget by default.** `LoRaTransport::send()`'s `acknowledged` is
+  always `false` — no app-layer ARQ. PDR/reliability is a future benchmark app's job (via its own
+  sequence numbers), not the library's. A software ack (still no retransmission) is available
+  behind the `CONNECTIONLIB_LORA_ACK` build macro; see the LoRa backend section.
 - **"Native" baseline for the verify-against-native step = raw RadioLib calls**, not a hand-rolled
   SX1278 SPI driver. The comparison measures ConnectionLib's own wrapping overhead on top of
   RadioLib, not RadioLib's overhead vs. bare-metal.
@@ -341,6 +342,27 @@ MAC-layer ack, and building an app-layer ARQ here would add protocol complexity 
 future benchmark app's own sequence-number-based PDR computation. This means "send success" means
 different things across backends (MAC-confirmed for ESP-NOW vs. "bits clocked out" for LoRa) —
 worth keeping in mind when the benchmark app interprets results, but not a library-level problem.
+
+**Optional software ack: `-DCONNECTIONLIB_LORA_ACK`.** For applications that want LoRa's
+`acknowledged` to mean what it means on the other two backends. With the macro defined,
+`listen()` answers every unicast frame it returns with a header-only ack frame (same `seq`), and
+`send()` waits up to `LoRaConfig::ackTimeoutMs` (default 1000 ms) for it: `Ok` with
+`acknowledged = true`, or `SendStatus::Timeout`. Still no retransmission. It is a build macro
+rather than a config field because it changes the frame layout — the header gains a `flags` byte
+(6 → 7 bytes, `maxPayloadBytes()` 249 → 248) — so **every node on a link must be built with the
+same setting**, and the default build keeps the 6-byte header the measurement methodology
+describes. Consequences of doing this on a half-duplex, duty-cycle-limited radio:
+
+- Broadcasts are never acked (all receivers would answer at once), so they stay fire-and-forget.
+- The receiver only acks from inside `listen()`; a sender whose peer is not listening at that
+  moment gets `Timeout` even if the frame is picked up later.
+- Acks are airtime (~140 ms at the default radio settings). They count against the *receiver's*
+  duty-cycle budget and are skipped, not delayed, once it is exhausted — a gateway acking many
+  satellites spends its own 10 %.
+- A data frame that arrives while `send()` is waiting for its ack is held in a single slot for
+  the next `listen()` and acked only then, possibly after its sender has given up.
+- Under `FragmentingTransport` every fragment is acked individually, so a message stops at the
+  first unacknowledged fragment instead of being sent in full into the void.
 
 **RSSI/SNR**: `radio.getRSSI()`/`getSNR()` called immediately after a successful `receive()` inside
 `listen()` — works natively for LoRa, no workaround needed.

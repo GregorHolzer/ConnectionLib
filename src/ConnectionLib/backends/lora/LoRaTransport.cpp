@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <utility>
 
 #include <Arduino.h>
 
@@ -40,7 +41,7 @@ int LoRaTransport::lastErrorCode() const {
 SendResult LoRaTransport::send(const Address &destination, const uint8_t *payload, size_t len) {
     SendResult result;
     result.payloadBytes = len;
-    result.acknowledged = false;   // fire-and-forget: raw SX1278 has no MAC-layer ack
+    result.acknowledged = false;   // raw SX1278 has no MAC-layer ack; see CONNECTIONLIB_LORA_ACK below
 
     auto destNodeId = destination.asLoRaNodeId();
     if (!destNodeId) {
@@ -82,6 +83,34 @@ SendResult LoRaTransport::send(const Address &destination, const uint8_t *payloa
 
     lastError_ = state;
     result.status = (state == RADIOLIB_ERR_NONE) ? SendStatus::Ok : SendStatus::Failed;
+
+#if defined(CONNECTIONLIB_LORA_ACK)
+    // Broadcasts are not acked: every receiver would answer at once and the acks would collide.
+    if (state == RADIOLIB_ERR_NONE && *destNodeId != 0xFFFF) {
+        result.status = SendStatus::Timeout;
+        uint32_t waitStart = millis();
+        while (millis() - waitStart < config_.ackTimeoutMs) {
+            FrameHeader received;
+            std::optional<ReceivedMessage> frame = readFrame(received);
+            if (!frame) {
+                delay(1);
+                continue;
+            }
+            if ((received.flags & kAckFlag) == 0) {
+                // Someone else's data, not our ack: keep it for the next listen() rather than drop it.
+                if (!pendingRx_) {
+                    pendingRx_ = PendingFrame{received, std::move(*frame)};
+                }
+                continue;
+            }
+            if (received.srcNodeId == *destNodeId && received.seq == header.seq) {
+                result.acknowledged = true;
+                result.status = SendStatus::Ok;
+                break;
+            }
+        }
+    }
+#endif
     return result;
 }
 
@@ -99,6 +128,48 @@ std::optional<ReceivedMessage> LoRaTransport::listen(uint32_t timeoutMs) {
 }
 
 std::optional<ReceivedMessage> LoRaTransport::receiveOnce() {
+    FrameHeader header;
+#if defined(CONNECTIONLIB_LORA_ACK)
+    std::optional<ReceivedMessage> msg;
+    if (pendingRx_) {
+        header = pendingRx_->header;
+        msg = std::move(pendingRx_->message);
+        pendingRx_.reset();
+    } else {
+        msg = readFrame(header);
+    }
+    if (!msg || (header.flags & kAckFlag) != 0) {
+        return std::nullopt;   // nothing, or a stray ack for a send() that already gave up
+    }
+    if (header.destNodeId == config_.nodeId) {
+        sendAck(header);
+    }
+    return msg;
+#else
+    return readFrame(header);
+#endif
+}
+
+#if defined(CONNECTIONLIB_LORA_ACK)
+void LoRaTransport::sendAck(const FrameHeader &received) {
+    uint32_t estimatedMs = static_cast<uint32_t>(radio_.getTimeOnAir(sizeof(FrameHeader)) / 1000);
+    if (!dutyCycle_.canTransmit(millis(), estimatedMs)) {
+        return;   // an ack is airtime like any other frame; the sender will report Timeout
+    }
+
+    uint8_t buffer[sizeof(FrameHeader)];
+    FrameHeader ack{received.srcNodeId, config_.nodeId, received.seq, 0, kAckFlag};
+    std::memcpy(buffer, &ack, sizeof(FrameHeader));
+
+    uint32_t t0 = micros();
+    radio_.transmit(buffer, sizeof(FrameHeader));
+    uint32_t t1 = micros();
+    radio_.startReceive();
+    dutyCycle_.recordTransmission(millis(), (t1 - t0) / 1000);
+}
+#endif
+
+std::optional<ReceivedMessage> LoRaTransport::readFrame(FrameHeader &header) {
     if (digitalRead(config_.pins.dio0) != HIGH) {
         return std::nullopt;
     }
@@ -123,7 +194,6 @@ std::optional<ReceivedMessage> LoRaTransport::receiveOnce() {
         return std::nullopt;
     }
 
-    FrameHeader header;
     std::memcpy(&header, buffer, sizeof(FrameHeader));
 
     if (header.destNodeId != config_.nodeId && header.destNodeId != 0xFFFF) {

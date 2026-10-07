@@ -52,6 +52,11 @@ struct LoRaConfig {
     // 10% per hour = 360s of airtime, the h1.3 limit above. Previously 1%, which was an
     // unverified placeholder and roughly ten times stricter than the band actually requires.
     DutyCycleConfig dutyCycle{10.0f, 3'600'000};
+#if defined(CONNECTIONLIB_LORA_ACK)
+    // How long send() waits for the receiver's ack frame. Has to cover the ack's own airtime
+    // (~140ms at the defaults above) plus the receiver's turnaround; raise it for higher SFs.
+    uint32_t ackTimeoutMs = 1000;
+#endif
 };
 
 /**
@@ -60,8 +65,23 @@ struct LoRaConfig {
  * seq/payloadLen) before every transmit and filters on it in listen() — backend-internal, never
  * exposed through the Transport interface.
  *
- * Ack semantics: fire-and-forget. acknowledged is always false in SendResult — raw SX1278 has no
- * MAC-layer ack; PDR/reliability is a future benchmark app's job via its own sequence numbers.
+ * Ack semantics: fire-and-forget by default. acknowledged is always false in SendResult — raw
+ * SX1278 has no MAC-layer ack; PDR/reliability is a future benchmark app's job via its own
+ * sequence numbers.
+ *
+ * Building with `-DCONNECTIONLIB_LORA_ACK` adds a software ack instead: listen() answers every
+ * unicast frame it returns with a header-only ack frame, and send() waits up to
+ * LoRaConfig::ackTimeoutMs for it, reporting Ok/acknowledged or SendStatus::Timeout. There are no
+ * retransmissions. Things to know before enabling it:
+ *   - It changes the wire format (the header grows by a flags byte, 6 -> 7), so every node on
+ *     the link must be built with the same setting.
+ *   - Broadcasts are never acked, so a broadcast send() behaves as without the option.
+ *   - The receiver only acks from inside listen(), so the sender times out unless the peer is
+ *     listening at that moment.
+ *   - Acks are airtime: they count against the receiver's duty-cycle budget and are skipped,
+ *     not delayed, when that budget is exhausted.
+ *   - A data frame that arrives while send() is waiting for its ack is held (one slot) for the
+ *     next listen() and only acked then, which may be after its sender has given up.
  *
  * Receiving needs no interrupt handler: setup() puts the radio into continuous receive via
  * startReceive(), and listen() just checks the DIO0 pin (which the SX1278 maps to RxDone by
@@ -98,12 +118,32 @@ class LoRaTransport : public Transport {
         uint16_t srcNodeId;
         uint8_t seq;
         uint8_t payloadLen;
+#if defined(CONNECTIONLIB_LORA_ACK)
+        uint8_t flags;   // kAckFlag marks an ack frame
+#endif
     };
 
     static constexpr size_t kMaxRadioPacket = 255;   // SX1278/RadioLib single-packet limit
 
-    /** @brief Non-blocking: read one packet addressed to this node, if RxDone is signalled. */
+    /** @brief Non-blocking: read one frame addressed to this node, if RxDone is signalled. */
+    std::optional<ReceivedMessage> readFrame(FrameHeader &header);
+
+    /** @brief Non-blocking: one received message, if any (acking it under CONNECTIONLIB_LORA_ACK). */
     std::optional<ReceivedMessage> receiveOnce();
+
+#if defined(CONNECTIONLIB_LORA_ACK)
+    static constexpr uint8_t kAckFlag = 0x01;
+
+    struct PendingFrame {
+        FrameHeader header;
+        ReceivedMessage message;
+    };
+
+    void sendAck(const FrameHeader &received);
+
+    // A data frame that arrived while send() was waiting for its ack, held for the next listen().
+    std::optional<PendingFrame> pendingRx_;
+#endif
 
     LoRaConfig config_;
     DutyCycleGuard dutyCycle_;
