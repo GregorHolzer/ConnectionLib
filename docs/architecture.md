@@ -27,18 +27,20 @@ include/ConnectionLib/             # public headers, namespace `connectionlib`
   Address.hpp
   LinkMetrics.hpp                  # LinkMetrics / SendResult / ReceivedMessage / SendStatus
   DutyCycleGuard.hpp
+  FragmentingTransport.hpp         # opt-in wrapper: payload splitting + duty-cycle send queue
   backends/espnow/EspNowTransport.hpp   # + EspNowConfig
   backends/lora/LoRaTransport.hpp       # + LoRaConfig, LoRaPinConfig (T-Beam defaults)
   backends/zigbee/ZigbeeTransport.hpp   # + ZigbeeConfig, ZigbeePinConfig (T-Beam wiring)
 
 src/ConnectionLib/
   DutyCycleGuard.cpp
+  FragmentingTransport.cpp
   backends/espnow/EspNowTransport.cpp
   backends/lora/LoRaTransport.cpp
   backends/zigbee/ZigbeeTransport.cpp
 
 test/
-  test_address/  test_duty_cycle/       # pure logic, native host env, no hardware
+  test_address/  test_duty_cycle/  test_fragmenting/   # pure logic, native host env, no hardware
   test_espnow_device/  test_lora_device/  # optional, added later once M3/M5 numbers exist
 ```
 
@@ -129,9 +131,9 @@ struct LinkMetrics {
     std::optional<float> rssiDbm;       // nullopt where the backend/hardware doesn't expose it
     std::optional<float> snrDb;
 };
-enum class SendStatus : uint8_t { Ok, Timeout, DutyCycleExceeded, PayloadTooLarge, NotReady, Failed };
+enum class SendStatus : uint8_t { Ok, Timeout, DutyCycleExceeded, PayloadTooLarge, NotReady, Failed, Queued };
 struct SendResult : LinkMetrics {
-    SendStatus status;
+    SendStatus status;                  // Queued is only ever returned by FragmentingTransport
     size_t payloadBytes;
     bool acknowledged;                  // backend-defined; see per-backend sections
 };
@@ -153,16 +155,18 @@ class Transport {
     virtual SendResult send(const Address &destination, const uint8_t *payload, size_t len) = 0;
     virtual std::optional<ReceivedMessage> listen(uint32_t timeoutMs) = 0;   // blocks up to timeoutMs; 0 = non-blocking check
     [[nodiscard]] virtual Address broadcastAddress() const = 0;
-    [[nodiscard]] virtual size_t maxPayloadBytes() const = 0;   // MTU; caller chunks, base class never auto-chunks
+    [[nodiscard]] virtual size_t maxPayloadBytes() const = 0;   // MTU; a backend never auto-chunks
     [[nodiscard]] virtual const char *technologyName() const = 0;
     [[nodiscard]] virtual float currentDutyCyclePercent() const = 0;
     [[nodiscard]] virtual uint32_t timeUntilNextAllowedMs(size_t payloadLen) const = 0;
     virtual ~Transport() = default;
 };
 ```
-No auto-chunking: if `len > maxPayloadBytes()`, `send()` returns `SendStatus::PayloadTooLarge`.
-Chunking/retry policy (sensor-system's 15×`ClientDataPackage` + RTC-cache-on-timeout) is an
-app-level decision, not something to bake into a technology-agnostic interface.
+No auto-chunking in the backends: if `len > maxPayloadBytes()`, `send()` returns
+`SendStatus::PayloadTooLarge`. Chunking/retry policy (sensor-system's 15×`ClientDataPackage` +
+RTC-cache-on-timeout) is not baked into the technology-agnostic interface. Applications that do
+not want to deal with it opt in to `FragmentingTransport` (see
+[Opt-in payload splitting](#opt-in-payload-splitting-and-send-queue) below).
 
 **`ProtocolKind`** (`include/ConnectionLib/Transport.hpp`) — `enum class ProtocolKind : uint8_t {
 EspNow, LoRa, Zigbee };`. A shared vocabulary type so application code can select a backend via a
@@ -228,6 +232,71 @@ library. It also keeps "duty-cycle throttled" distinguishable from "link failed"
 future benchmark app collects for RQ1. `EspNowConfig`'s default duty cycle is effectively unlimited
 (100%; EN 300 328 sets no duty-cycle limit for adaptive equipment); a future benchmark app can still configure a matching
 artificial cap on ESP-NOW to create a level playing field against LoRa's regulatory one.
+
+## Opt-in payload splitting and send queue
+
+`FragmentingTransport : Transport` (`include/ConnectionLib/FragmentingTransport.hpp`) is a
+decorator around any `Transport&` for applications that want to hand over a buffer and not care
+about the backend's packet size or its duty-cycle lock:
+```cpp
+LoRaTransport lora(config);
+FragmentingTransport transport(lora);      // opt in; setup() forwards to the backend
+transport.send(dest, buffer, 600);         // three LoRa packets
+auto message = transport.listen(1000);     // the whole 600 bytes, or std::nullopt
+```
+**Why a wrapper and not a mode of the backends.** Splitting needs a header on every packet, and
+one `send()` stops meaning one packet. Inside the backends that would have cost ESP-NOW and Zigbee
+their zero-overhead framing (the *payload efficiency* metric in
+[`measurement-methodology.md`](measurement-methodology.md)), broken wire compatibility with native
+peers, and blurred the per-packet `SendResult` the RQ1/RQ2 benchmark is built on. As a wrapper it
+is one implementation for all three backends, and anything that does not wrap — the benchmark
+included — is unaffected. It is pure C++17 with no clock of its own (all waiting is delegated to
+the wrapped `listen()`), so it is host-tested in `test/test_fragmenting`.
+
+```cpp
+struct FragmentingConfig {
+    size_t maxMessageBytes = 1024;       // largest message accepted for send and reassembly
+    size_t maxPartialMessages = 4;       // reassembly slots (one per sending peer)
+    size_t maxQueuedMessages = 4;        // send queue used while duty-cycle locked; 0 = no queuing
+    uint32_t fragmentTimeoutMs = 5000;   // max wait for the next fragment of a message in progress
+};
+```
+
+**Wire format.** Every packet carries `msgId | fragIndex | fragCount` (one byte each) in front of
+the application bytes, including messages that fit in one packet. Both ends of a link must
+therefore use the wrapper. `maxPayloadBytes()` becomes
+`min(maxMessageBytes, (inner.maxPayloadBytes() - 3) * 255)`.
+
+**Sending is all-or-nothing, with no retransmission** — consistent with the fire-and-forget
+decision for LoRa. `send()` pushes the fragments through the backend in order and stops at the
+first one that is not `Ok`, returning that status. The `SendResult` describes the whole message:
+`totalBytes` summed over its packets, `acknowledged` only if every packet was, timestamp/RSSI/SNR
+from the last packet. Message delivery therefore degrades roughly as p^n with the fragment count,
+which matters most on LoRa where nothing is acknowledged.
+
+**Send queue.** The backends still *reject* when duty-cycle locked (see above); the wrapper adds
+a bounded FIFO on top. When the backend is locked — before the first fragment or part-way through
+a message — `send()` keeps the message and returns `SendStatus::Queued`; with the queue full or
+disabled it returns `DutyCycleExceeded` as a backend would. Queued messages are sent, in order,
+at the start of the next `send()` or `listen()` once the budget allows, and those calls block for
+that airtime. Three consequences: a queued message whose packet later fails for another reason is
+dropped without notice (there is no callback path to report it); the queue is RAM only, so a node
+should check `queuedMessages()` before deep sleep; and on LoRa a lock can last up to the one-hour
+window.
+
+**Receiving.** `listen(timeoutMs)` waits that long for a first packet. Once a message has started
+arriving it **stays in the function until the message is complete**, even past its own timeout,
+allowing `fragmentTimeoutMs` for each further packet. If that runs out it returns `std::nullopt`
+but keeps the partial message, so a sender that was locked part-way through can finish it during
+a later `listen()`. Reassembly keeps one slot per source: fragments must arrive in order, a
+repeated fragment is ignored, a gap or a new message from the same source discards the partial,
+and the oldest slot is evicted when all are in use. Because the wrapper has no clock, `listen()`
+may return `std::nullopt` before its timeout when an unusable packet arrived; callers loop on it
+anyway. The receiver must call `listen()` often enough that the backend's own receive buffer (see
+the receive model above) does not overflow between fragments.
+
+Zigbee stays at 84 B per packet under the wrapper; the XBee firmware's own fragmentation is not
+used, so behaviour is the same on all three backends.
 
 ## ESP-NOW backend
 
