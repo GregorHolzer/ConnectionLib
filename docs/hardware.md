@@ -100,7 +100,7 @@ writing it to the same UART unescaped: `0x8B` status in ~50 ms, versus a 1500 ms
 `xbee_.send()`.
 
 Receive is unaffected in practice: an `AP=1` module sends unescaped, and xbee-arduino's parser
-only unescapes when it actually sees `0x7D`. So `poll()` appears to work fine, which further
+only unescapes when it actually sees `0x7D`. So `listen()` appears to work fine, which further
 misdirects the diagnosis.
 
 ### Converting 802.15.4 firmware to ZigBee

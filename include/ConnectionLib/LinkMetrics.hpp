@@ -18,7 +18,7 @@ struct LinkMetrics {
 };
 
 /** @brief Outcome of a Transport::send() call. */
-enum class SendStatus : uint8_t { Ok, Timeout, DutyCycleExceeded, PayloadTooLarge, NotReady, Failed };
+enum class SendStatus : uint8_t { Ok, Timeout, DutyCycleExceeded, PayloadTooLarge, NotReady, Failed, Queued };
 
 /** @brief Result of a Transport::send() call, for both the caller and a future benchmark app. */
 struct SendResult : LinkMetrics {
@@ -27,7 +27,7 @@ struct SendResult : LinkMetrics {
     bool acknowledged = false;  // backend-defined; see each backend's docs for what this means
 };
 
-/** @brief One message returned from Transport::poll(). */
+/** @brief One message returned from Transport::listen(). */
 struct ReceivedMessage : LinkMetrics {
     Address source;
     std::vector<uint8_t> payload;

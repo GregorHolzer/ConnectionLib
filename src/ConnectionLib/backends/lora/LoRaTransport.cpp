@@ -26,7 +26,7 @@ bool LoRaTransport::setup() {
         return false;
     }
 
-    // Non-blocking poll()/available-to-read is a plain digitalRead() of DIO0, which the SX1278
+    // The available-to-read check in listen() is a plain digitalRead() of DIO0, which the SX1278
     // maps to RxDone by default while in continuous-receive mode — no interrupt handler needed.
     state = radio_.startReceive();
     lastError_ = state;
@@ -71,7 +71,7 @@ SendResult LoRaTransport::send(const Address &destination, const uint8_t *payloa
     int16_t state = radio_.transmit(buffer, totalLen);
     uint32_t t1 = micros();
 
-    // transmit() takes the radio out of receive mode; resume listening for the poll()-side check.
+    // transmit() takes the radio out of receive mode; resume receiving for the listen()-side check.
     radio_.startReceive();
 
     result.timestampMicros = t1;
@@ -85,7 +85,20 @@ SendResult LoRaTransport::send(const Address &destination, const uint8_t *payloa
     return result;
 }
 
-std::optional<ReceivedMessage> LoRaTransport::poll() {
+std::optional<ReceivedMessage> LoRaTransport::listen(uint32_t timeoutMs) {
+    uint32_t start = millis();
+    while (true) {
+        if (auto msg = receiveOnce()) {
+            return msg;
+        }
+        if (millis() - start >= timeoutMs) {
+            return std::nullopt;
+        }
+        delay(1);
+    }
+}
+
+std::optional<ReceivedMessage> LoRaTransport::receiveOnce() {
     if (digitalRead(config_.pins.dio0) != HIGH) {
         return std::nullopt;
     }

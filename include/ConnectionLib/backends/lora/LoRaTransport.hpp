@@ -57,15 +57,17 @@ struct LoRaConfig {
 /**
  * @brief LoRa backend, wrapping RadioLib's SX1278 driver. Raw SX1278 point-to-point has no
  * PHY-layer addressing, so this class prepends a thin software header (destNodeId/srcNodeId/
- * seq/payloadLen) before every transmit and filters on it in poll() — backend-internal, never
+ * seq/payloadLen) before every transmit and filters on it in listen() — backend-internal, never
  * exposed through the Transport interface.
  *
  * Ack semantics: fire-and-forget. acknowledged is always false in SendResult — raw SX1278 has no
  * MAC-layer ack; PDR/reliability is a future benchmark app's job via its own sequence numbers.
  *
- * poll() is genuinely non-blocking: setup() puts the radio into continuous receive via
- * startReceive(), and poll() just checks the DIO0 pin (which the SX1278 maps to RxDone by
- * default) before touching RadioLib at all.
+ * Receiving needs no interrupt handler: setup() puts the radio into continuous receive via
+ * startReceive(), and listen() just checks the DIO0 pin (which the SX1278 maps to RxDone by
+ * default) before touching RadioLib at all. The radio is half-duplex and holds a single packet:
+ * nothing is received during this node's own send(), and a packet not collected by listen()
+ * before the next one arrives is lost.
  *
  * On boards where the SX1278 is behind a gated power rail (e.g. the T-Beam's AXP2101 PMU, which
  * powers the radio through its ALDO2 channel), the application must enable that rail before
@@ -83,7 +85,7 @@ class LoRaTransport : public Transport {
     bool setup() override;
     [[nodiscard]] int lastErrorCode() const override;
     SendResult send(const Address &destination, const uint8_t *payload, size_t len) override;
-    std::optional<ReceivedMessage> poll() override;
+    std::optional<ReceivedMessage> listen(uint32_t timeoutMs) override;
     [[nodiscard]] Address broadcastAddress() const override;
     [[nodiscard]] size_t maxPayloadBytes() const override;
     [[nodiscard]] const char *technologyName() const override;
@@ -99,6 +101,9 @@ class LoRaTransport : public Transport {
     };
 
     static constexpr size_t kMaxRadioPacket = 255;   // SX1278/RadioLib single-packet limit
+
+    /** @brief Non-blocking: read one packet addressed to this node, if RxDone is signalled. */
+    std::optional<ReceivedMessage> receiveOnce();
 
     LoRaConfig config_;
     DutyCycleGuard dutyCycle_;

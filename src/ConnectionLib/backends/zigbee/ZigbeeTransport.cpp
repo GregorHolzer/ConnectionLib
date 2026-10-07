@@ -14,7 +14,7 @@ bool ZigbeeTransport::setup() {
     serial_.begin(config_.baud, SERIAL_8N1, config_.pins.rx, config_.pins.tx);
     xbee_.begin(serial_);
     return true;   // xbee-arduino has no explicit init handshake to fail; a bad wiring only
-                    // surfaces later as send()/poll() never seeing a response.
+                    // surfaces later as send()/listen() never seeing a response.
 }
 
 int ZigbeeTransport::lastErrorCode() const {
@@ -46,7 +46,7 @@ SendResult ZigbeeTransport::send(const Address &destination, const uint8_t *payl
     // Pass the peer's 16-bit address through rather than using xbee-arduino's shorter
     // ZBTxRequest(addr64, payload, len) constructor, which hardcodes addr16 to
     // ZB_BROADCAST_ADDRESS (0xFFFE) = "unknown, go discover it" and so discards the addr16 that
-    // Address::xbee() carries and poll() fills in from the sender. Measured against hardware
+    // Address::xbee() carries and listen() fills in from the sender. Measured against hardware
     // both forms deliver, so this is about not throwing away known information rather than a
     // correctness fix. Broadcast is unaffected: Address::broadcast(XBee64_16) already sets 0xFFFE.
     XBeeAddress64 addr64(destXBee->addr64);
@@ -75,7 +75,7 @@ SendResult ZigbeeTransport::send(const Address &destination, const uint8_t *payl
             break;
         }
         if (apiId == ZB_RX_RESPONSE && !pendingRx_) {
-            // Hold it for the next poll() rather than dropping it. The peer's reply commonly
+            // Hold it for the next listen() rather than dropping it. The peer's reply commonly
             // lands inside this window, since a broadcast status takes ~1s to resolve.
             pendingRx_ = buildReceived();
         }
@@ -107,7 +107,20 @@ ReceivedMessage ZigbeeTransport::buildReceived() {
     return msg;
 }
 
-std::optional<ReceivedMessage> ZigbeeTransport::poll() {
+std::optional<ReceivedMessage> ZigbeeTransport::listen(uint32_t timeoutMs) {
+    uint32_t start = millis();
+    while (true) {
+        if (auto msg = receiveOnce()) {
+            return msg;
+        }
+        if (millis() - start >= timeoutMs) {
+            return std::nullopt;
+        }
+        delay(1);
+    }
+}
+
+std::optional<ReceivedMessage> ZigbeeTransport::receiveOnce() {
     if (pendingRx_) {   // arrived while send() was waiting for its TX status
         ReceivedMessage msg = std::move(*pendingRx_);
         pendingRx_.reset();

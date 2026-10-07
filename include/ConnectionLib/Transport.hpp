@@ -27,13 +27,15 @@ enum class ProtocolKind : uint8_t { EspNow, LoRa, Zigbee };   // Zigbee: reserve
  * code is written once against this interface; which concrete backend (ESP-NOW, LoRa, later
  * Zigbee) actually carries the traffic can change without touching the caller.
  *
- * Receive model is poll-based: send() blocks (bounded by an internal timeout) until the backend's
- * own definition of "done" resolves; poll() is non-blocking and should be called repeatedly from
- * the application's loop(). No async/callback path is exposed here, since not every backend can
- * honestly offer one (xbee-arduino's readPacket() is fundamentally polled).
+ * Both directions block with a bound: send() blocks (bounded by an internal timeout) until the
+ * backend's own definition of "done" resolves; listen() blocks for at most the timeout it is
+ * given and returns as soon as one message has arrived. No async/callback path is exposed here,
+ * since not every backend can honestly offer one (xbee-arduino's readPacket() is fundamentally
+ * polled).
  *
- * Never auto-chunks: if a payload exceeds maxPayloadBytes(), send() returns
- * SendStatus::PayloadTooLarge. Chunking/retry policy is an application-level decision.
+ * A backend never auto-chunks: if a payload exceeds maxPayloadBytes(), send() returns
+ * SendStatus::PayloadTooLarge. Applications that want large payloads split for them opt in by
+ * wrapping the backend in a FragmentingTransport (FragmentingTransport.hpp).
  */
 class Transport {
   public:
@@ -46,8 +48,8 @@ class Transport {
     /** @brief Send payload to destination. Blocks (bounded by an internal timeout) until resolved. */
     virtual SendResult send(const Address &destination, const uint8_t *payload, size_t len) = 0;
 
-    /** @brief Non-blocking poll for one received message, if any is available right now. */
-    virtual std::optional<ReceivedMessage> poll() = 0;
+    /** @brief Wait up to timeoutMs for one received message. listen(0) is a single non-blocking check. */
+    virtual std::optional<ReceivedMessage> listen(uint32_t timeoutMs) = 0;
 
     [[nodiscard]] virtual Address broadcastAddress() const = 0;
 

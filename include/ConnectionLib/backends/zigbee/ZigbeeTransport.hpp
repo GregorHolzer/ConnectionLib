@@ -42,8 +42,8 @@ struct ZigbeeConfig {
  * whether the destination actually received the frame (with mesh retries already applied by the
  * module itself), so SendResult::acknowledged is genuinely meaningful here, not a placeholder.
  *
- * poll() is genuinely non-blocking: xbee-arduino's readPacket() (no-argument form) returns
- * immediately whether or not a frame is waiting - matches the Transport contract exactly.
+ * listen() polls xbee-arduino's readPacket() (no-argument form), which returns immediately
+ * whether or not a frame is waiting, so listen(0) is a true non-blocking check.
  *
  * REQUIRES ZB (ZigBee) FIRMWARE. XBee S2C hardware also ships with 802.15.4 firmware, which
  * implements a completely different API frame set (transmit 0x00/0x01 with status 0x89, receive
@@ -81,7 +81,7 @@ class ZigbeeTransport : public Transport {
     bool setup() override;
     [[nodiscard]] int lastErrorCode() const override;
     SendResult send(const Address &destination, const uint8_t *payload, size_t len) override;
-    std::optional<ReceivedMessage> poll() override;
+    std::optional<ReceivedMessage> listen(uint32_t timeoutMs) override;
     [[nodiscard]] Address broadcastAddress() const override;
     [[nodiscard]] size_t maxPayloadBytes() const override;
     [[nodiscard]] const char *technologyName() const override;
@@ -99,6 +99,9 @@ class ZigbeeTransport : public Transport {
     /** @brief Parse the frame currently held by xbee_ as a ReceivedMessage. */
     ReceivedMessage buildReceived();
 
+    /** @brief Non-blocking: return the held-over message or one RX frame, if any is waiting. */
+    std::optional<ReceivedMessage> receiveOnce();
+
     ZigbeeConfig config_;
     DutyCycleGuard dutyCycle_;
     HardwareSerial serial_{2};
@@ -106,7 +109,7 @@ class ZigbeeTransport : public Transport {
     int lastError_ = 0;
 
     // A message that arrived while send() was waiting for its TX status, held over for the next
-    // poll(). Without this the reply to a just-sent request is routinely lost: a ZB broadcast
+    // listen(). Without this the reply to a just-sent request is routinely lost: a ZB broadcast
     // status takes ~1s to come back, which is ample time for the peer to answer, and send()
     // would otherwise discard that frame while scanning for its own status.
     // Single-slot on purpose: one in-flight request/response is the pattern this library

@@ -151,7 +151,7 @@ class Transport {
     virtual bool setup() = 0;                              // can genuinely fail (bad wiring, esp_now_init error)
     [[nodiscard]] virtual int lastErrorCode() const = 0;    // backend-native code, for diagnostics
     virtual SendResult send(const Address &destination, const uint8_t *payload, size_t len) = 0;
-    virtual std::optional<ReceivedMessage> poll() = 0;      // non-blocking, call from loop()
+    virtual std::optional<ReceivedMessage> listen(uint32_t timeoutMs) = 0;   // blocks up to timeoutMs; 0 = non-blocking check
     [[nodiscard]] virtual Address broadcastAddress() const = 0;
     [[nodiscard]] virtual size_t maxPayloadBytes() const = 0;   // MTU; caller chunks, base class never auto-chunks
     [[nodiscard]] virtual const char *technologyName() const = 0;
@@ -181,12 +181,21 @@ in application code, which already knows which backends it has chosen to link in
 already applied to board bring-up (T-Beam pins, AXP2101 power), which also lives in the examples
 repo, not this library.
 
-**Receive model: blocking `send()` (bounded by a timeout) + polled `poll()`, no async callbacks.**
+**Receive model: blocking `send()` (bounded by a timeout) + blocking `listen(timeoutMs)`, no async callbacks.**
 Justification: ESP-NOW's existing pattern already blocks on a flag; RadioLib's interrupt-driven
 path needs ISR-safe code with no equivalent on the other backends; `xbee-arduino` (the eventual
 Zigbee driver) has **no callback path at all** — `readPacket()` is fundamentally a polled read. A
 poll-based receive is the one model all three backends can honestly implement identically, which
-is what keeps app code identical across backends. It's also what makes the native-vs-library timing
+is what keeps app code identical across backends. `listen(timeoutMs)` is that poll wrapped in a
+bounded wait loop inside each backend (a private non-blocking `receiveOnce()`, retried every 1 ms
+until the timeout), so the application states how long it is willing to wait instead of writing
+the loop itself; `listen(0)` is the plain non-blocking check. It replaced an earlier non-blocking
+`poll()` on the interface. A raw backend returns after one packet.
+
+Receiving is never duty-cycle limited, but no backend buffers without bound, so messages are lost
+if `listen()` is not called often enough: LoRa is half-duplex (deaf during its own `send()`) and
+the SX1278 holds a single packet; ESP-NOW keeps 8 packets in its ring buffer; Zigbee frames wait
+in the UART buffer, and only one RX frame is kept while a `send()` waits for its status. It's also what makes the native-vs-library timing
 comparison in the verify step clean (`t0 = micros(); send(); t1 = micros();`).
 
 ## Duty-cycle enforcement
@@ -230,12 +239,12 @@ matching sensor-system exactly).
   static-flag-from-recv-callback pattern for detecting completion, with a configurable timeout
   (default 2000ms, matching sensor-system's existing value). No chunking, no RTC-memory
   cache-on-timeout fallback — `send()` just returns `SendStatus::Timeout` and lets the caller decide.
-- **Surfaced**: `send()`/`poll()`/`SendResult` per the generic interface.
+- **Surfaced**: `send()`/`listen()`/`SendResult` per the generic interface.
   `SendResult.acknowledged = (status == ESP_NOW_SEND_SUCCESS)` from `esp_now_send_cb` — reuses the
   WiFi driver's MAC-layer ack for free, no app-layer ack needed.
   `maxPayloadBytes()` returns ESP-NOW's native MTU (~250 bytes).
   `rssiDbm`/`snrDb` are left `nullopt` — see risks below.
-  `poll()` drains a small internal queue fed by the recv callback (callback itself stays minimal:
+  `listen()` drains a small internal queue fed by the recv callback (callback itself stays minimal:
   push raw bytes, no allocation/parsing inside it).
 
 ## LoRa backend
@@ -255,7 +264,7 @@ before `radio.transmit()`:
 ```cpp
 struct LoRaFrameHeader { uint16_t destNodeId; uint16_t srcNodeId; uint8_t seq; uint8_t payloadLen; };
 ```
-`poll()` parses this header and drops (`std::nullopt`) any frame not addressed to `config.nodeId`
+`listen()` parses this header and skips (keeps waiting past) any frame not addressed to `config.nodeId`
 or the broadcast sentinel.
 
 **Ack: fire-and-forget (confirmed).** `acknowledged` is always `false` for LoRa — raw SX1278 has no
@@ -265,7 +274,7 @@ different things across backends (MAC-confirmed for ESP-NOW vs. "bits clocked ou
 worth keeping in mind when the benchmark app interprets results, but not a library-level problem.
 
 **RSSI/SNR**: `radio.getRSSI()`/`getSNR()` called immediately after a successful `receive()` inside
-`poll()` — works natively for LoRa, no workaround needed.
+`listen()` — works natively for LoRa, no workaround needed.
 
 **Duty cycle**: `LoRaConfig.dutyCycle` feeds a `DutyCycleGuard` exactly as ESP-NOW does.
 
@@ -300,9 +309,9 @@ applied — `send()` waits (bounded, `kTxStatusWaitMs = 1500`) for that specific
 (skipping over any other frame that arrives first, e.g. an incoming RX) and sets
 `SendResult::acknowledged` from `ZBTxStatusResponse::isSuccess()`.
 
-**`poll()` is genuinely non-blocking**: `xbee_.readPacket()` (the no-argument form) returns
-immediately whether or not a frame is waiting — matches `Transport::poll()`'s contract exactly,
-same as the other two backends' polling approach.
+**`listen(0)` is genuinely non-blocking**: `xbee_.readPacket()` (the no-argument form) returns
+immediately whether or not a frame is waiting, so `listen()` polls it in the same bounded loop as
+the other two backends.
 
 **`maxPayloadBytes()` = 84** — Digi's documented unfragmented RF payload limit for XBee S2C ZB
 firmware.
@@ -332,7 +341,7 @@ status at all. Because it is data-dependent it presents as intermittent: broadca
 since all Digi addresses begin `0013A200` and therefore always contain `0x13`. Confirmed by
 hand-writing the identical frame unescaped to the same UART — `0x8B` in ~50 ms versus a full
 timeout through `xbee_.send()`. Receive is unaffected (the parser only unescapes on seeing
-`0x7D`), so `poll()` working normally actively misdirects the diagnosis.
+`0x7D`), so `listen()` working normally actively misdirects the diagnosis.
 
 Three adjustments came out of this:
 
@@ -342,7 +351,7 @@ Three adjustments came out of this:
   — so a request/response exchange lost the response every single time, before `poll()` ever
   ran. This made `pingpong` retry sequence 0 forever while the node happily reported sending
   each `pong`. Any `ZB_RX_RESPONSE` seen during the wait is now held in `pendingRx_` and
-  returned by the next `poll()`. Single-slot: one in-flight request/response is the pattern
+  returned by the next `listen()`. Single-slot: one in-flight request/response is the pattern
   this library targets, and a second message inside the same window is still dropped.
 - **`kTxStatusWaitMs` 500 → 1500.** ZB *broadcast* status genuinely takes ~1 s; only unicast is
   fast (~50 ms). At 500 ms the first packet of every run reported `Timeout`, and worse, each

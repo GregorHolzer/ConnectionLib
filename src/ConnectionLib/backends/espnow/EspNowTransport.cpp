@@ -129,7 +129,20 @@ SendResult EspNowTransport::send(const Address &destination, const uint8_t *payl
     return result;
 }
 
-std::optional<ReceivedMessage> EspNowTransport::poll() {
+std::optional<ReceivedMessage> EspNowTransport::listen(uint32_t timeoutMs) {
+    uint32_t start = millis();
+    while (true) {
+        if (auto msg = receiveOnce()) {
+            return msg;
+        }
+        if (millis() - start >= timeoutMs) {
+            return std::nullopt;
+        }
+        delay(1);
+    }
+}
+
+std::optional<ReceivedMessage> EspNowTransport::receiveOnce() {
     uint8_t tail = queueTail_.load(std::memory_order_relaxed);
     uint8_t head = queueHead_.load(std::memory_order_acquire);
     if (tail == head) {

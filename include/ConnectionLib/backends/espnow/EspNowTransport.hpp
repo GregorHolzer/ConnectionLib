@@ -33,7 +33,7 @@ struct EspNowConfig {
 /**
  * @brief ESP-NOW backend. Wraps esp_now.h directly (Arduino-ESP32 core), matching sensor-system's
  * existing client-side transport. Peer registration, WiFi/esp_now_init sequencing, and the
- * ack-wait timeout stay internal; send()/poll() surface the technology-agnostic Transport interface.
+ * ack-wait timeout stay internal; send()/listen() surface the technology-agnostic Transport interface.
  *
  * Only one EspNowTransport may be active at a time per device — esp_now's C callback API has no
  * user-data parameter, so this class routes callbacks through a single static instance pointer,
@@ -50,7 +50,7 @@ class EspNowTransport : public Transport {
     bool setup() override;
     [[nodiscard]] int lastErrorCode() const override;
     SendResult send(const Address &destination, const uint8_t *payload, size_t len) override;
-    std::optional<ReceivedMessage> poll() override;
+    std::optional<ReceivedMessage> listen(uint32_t timeoutMs) override;
     [[nodiscard]] Address broadcastAddress() const override;
     [[nodiscard]] size_t maxPayloadBytes() const override;
     [[nodiscard]] const char *technologyName() const override;
@@ -72,11 +72,14 @@ class EspNowTransport : public Transport {
     static void onDataSentTrampoline(const uint8_t *mac, esp_now_send_status_t status);
     void handleRecv(const uint8_t *mac, const uint8_t *data, size_t len);
 
+    /** @brief Non-blocking: pop one message off the receive queue, if any. */
+    std::optional<ReceivedMessage> receiveOnce();
+
     EspNowConfig config_;
     DutyCycleGuard dutyCycle_;
     int lastError_ = 0;
 
-    // SPSC ring buffer: producer is the recv callback (WiFi task context), consumer is poll()
+    // SPSC ring buffer: producer is the recv callback (WiFi task context), consumer is listen()
     // (caller's loop() context). Indices are atomics so no FreeRTOS mutex is needed for this
     // single-producer/single-consumer case.
     std::array<QueuedMessage, kQueueCapacity> queue_{};
